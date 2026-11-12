@@ -1,0 +1,78 @@
+export interface ValueObject {
+    v: number; // value
+    u: string; // unit
+    d: number; // digits
+    max: number;
+    f?: string; // optional preformatted value
+}
+
+export interface InverterStatistics {
+    name: ValueObject;
+    Power?: ValueObject;
+    Voltage?: ValueObject;
+    Current?: ValueObject;
+    'Voltage Ph1-N'?: ValueObject;
+    'Current Ph1'?: ValueObject;
+    'Voltage Ph2-N'?: ValueObject;
+    'Current Ph2'?: ValueObject;
+    'Voltage Ph3-N'?: ValueObject;
+    'Current Ph3'?: ValueObject;
+    'Power DC'?: ValueObject;
+    YieldDay?: ValueObject;
+    YieldTotal?: ValueObject;
+    Frequency?: ValueObject;
+    Temperature?: ValueObject;
+    PowerFactor?: ValueObject;
+    ReactivePower?: ValueObject;
+    Efficiency?: ValueObject;
+    Irradiation?: ValueObject;
+    RawStatus?: ValueObject;
+}
+
+export interface RadioStatistics {
+    tx_request: number;
+    tx_re_request: number;
+    rx_success: number;
+    rx_fail_nothing: number;
+    rx_fail_partial: number;
+    rx_fail_corrupt: number;
+    rssi: number;
+}
+
+export interface Inverter {
+    serial: string;
+    name: string;
+    order: number;
+    data_age: number;
+    data_age_ms: number;
+    poll_enabled: boolean;
+    reachable: boolean;
+    producing: boolean;
+    limit_relative: number;
+    limit_absolute: number;
+    events: number;
+    event_count: number;
+    AC: InverterStatistics[];
+    DC: InverterStatistics[];
+    INV: InverterStatistics[];
+    radio_stats: RadioStatistics;
+}
+
+export interface Total {
+    Power: ValueObject;
+    YieldDay: ValueObject;
+    YieldTotal: ValueObject;
+}
+
+export interface Hints {
+    time_sync: boolean;
+    default_password: boolean;
+    radio_problem: boolean;
+    pin_mapping_issue: boolean;
+}
+
+export interface LiveData {
+    inverters: Inverter[];
+    total: Total;
+    hints: Hints;
+}

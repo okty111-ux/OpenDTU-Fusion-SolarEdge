@@ -1,0 +1,404 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * Copyright (C) 2022-2026 Thomas Basler and others
+ */
+#include "InverterAbstract.h"
+#include "Hoymiles.h"
+#include "commands/CommandAbstract.h"
+#include "crc.h"
+#include <HoymilesUtils.h>
+#include <cstring>
+#include <esp_log.h>
+
+#undef TAG
+static const char* TAG = "hoymiles";
+
+InverterAbstract::InverterAbstract(HoymilesRadio* radio, const uint64_t serial)
+{
+    _serial.u64 = serial;
+    _radio = radio;
+
+    _serialString = HoymilesUtils::formatSerial(serial);
+
+    _alarmLogParser.reset(new AlarmLogParser());
+    _devInfoParser.reset(new DevInfoParser());
+    _gridProfileParser.reset(new GridProfileParser());
+    _powerCommandParser.reset(new PowerCommandParser());
+    _rfInfoParser.reset(new RfInfoParser());
+    _statisticsParser.reset(new StatisticsParser());
+    _systemConfigParaParser.reset(new SystemConfigParaParser());
+}
+
+void InverterAbstract::init()
+{
+    // This has to be done here because:
+    // Not possible in constructor --> virtual function
+    // Not possible in verifyAllFragments --> Because no data if nothing is ever received
+    // It has to be executed because otherwise the getChannelCount method in stats always returns 0
+    _statisticsParser.get()->setByteAssignment(getByteAssignment(), getByteAssignmentSize());
+}
+
+uint64_t InverterAbstract::serial() const
+{
+    return _serial.u64;
+}
+
+const String& InverterAbstract::serialString() const
+{
+    return _serialString;
+}
+
+uint32_t InverterAbstract::getSingleDataCommandTimeout() const
+{
+    return 100;
+}
+
+uint32_t InverterAbstract::getRealTimeRunDataCommandTimeout() const
+{
+    return 500;
+}
+
+uint32_t InverterAbstract::getAlarmDataCommandTimeout() const
+{
+    return 750;
+}
+
+uint8_t InverterAbstract::getMaxRetransmitCount() const
+{
+    return MAX_DEFAULT_RETRANSMIT_COUNT;
+}
+
+void InverterAbstract::setRadioRecoverySettings(const uint16_t fragmentReplyTimeout, const uint8_t fragmentRetryLimit)
+{
+    const uint32_t timeout = RadioRecoverySettings::isValidFragmentReplyTimeout(fragmentReplyTimeout) ? fragmentReplyTimeout : 0;
+    const uint32_t retryLimit = RadioRecoverySettings::isValidFragmentRetryLimit(fragmentRetryLimit) ? fragmentRetryLimit : 0;
+    _radioRecoverySettings.store(timeout | (retryLimit << 16), std::memory_order_relaxed);
+}
+
+RadioRecoverySettings InverterAbstract::getRadioRecoverySettings() const
+{
+    const uint32_t settings = _radioRecoverySettings.load(std::memory_order_relaxed);
+    const uint32_t timeout = settings & 0xffff;
+    const uint8_t retryLimit = settings >> 16;
+    return {
+        timeout == 0 ? getSingleDataCommandTimeout() : timeout,
+        retryLimit == 0 ? getMaxRetransmitCount() : retryLimit,
+    };
+}
+
+uint32_t InverterAbstract::getEffectiveFragmentReplyTimeout() const
+{
+    return getRadioRecoverySettings().fragmentReplyTimeout;
+}
+
+uint8_t InverterAbstract::getEffectiveFragmentRetryLimit() const
+{
+    return getRadioRecoverySettings().fragmentRetryLimit;
+}
+
+void InverterAbstract::setName(const char* name)
+{
+    uint8_t len = strlen(name);
+    if (len + 1 > MAX_NAME_LENGTH) {
+        len = MAX_NAME_LENGTH - 1;
+    }
+    strncpy(_name, name, len);
+    _name[len] = '\0';
+}
+
+const char* InverterAbstract::name() const
+{
+    return _name;
+}
+
+bool InverterAbstract::isProducing()
+{
+    float totalAc = 0;
+    for (auto& c : Statistics()->getChannelsByType(TYPE_AC)) {
+        if (Statistics()->hasChannelFieldValue(TYPE_AC, c, FLD_PAC)) {
+            totalAc += Statistics()->getChannelFieldValue(TYPE_AC, c, FLD_PAC);
+        }
+    }
+
+    return _enablePolling && totalAc > 0;
+}
+
+bool InverterAbstract::isReachable()
+{
+    return _enablePolling && Statistics()->getRxFailureCount() <= _reachableThreshold;
+}
+
+bool InverterAbstract::wasHeardRecently(const uint32_t pollCycles) const
+{
+    if (_radio != Hoymiles.getRadioCmt() || CmtLink.lastHeardMs == 0) {
+        return false;
+    }
+    const uint32_t window = pollCycles * Hoymiles.PollInterval() * 1000 + 2000;
+    return millis() - CmtLink.lastHeardMs < window;
+}
+
+void InverterAbstract::setEnablePolling(const bool enabled)
+{
+    _enablePolling = enabled;
+}
+
+bool InverterAbstract::getEnablePolling() const
+{
+    return _enablePolling;
+}
+
+void InverterAbstract::setEnableCommands(const bool enabled)
+{
+    _enableCommands = enabled;
+}
+
+bool InverterAbstract::getEnableCommands() const
+{
+    return _enableCommands;
+}
+
+void InverterAbstract::setReachableThreshold(const uint8_t threshold)
+{
+    _reachableThreshold = threshold;
+}
+
+uint8_t InverterAbstract::getReachableThreshold() const
+{
+    return _reachableThreshold;
+}
+
+void InverterAbstract::setZeroValuesIfUnreachable(const bool enabled)
+{
+    _zeroValuesIfUnreachable = enabled;
+}
+
+bool InverterAbstract::getZeroValuesIfUnreachable() const
+{
+    return _zeroValuesIfUnreachable;
+}
+
+void InverterAbstract::setZeroYieldDayOnMidnight(const bool enabled)
+{
+    _zeroYieldDayOnMidnight = enabled;
+}
+
+bool InverterAbstract::getZeroYieldDayOnMidnight() const
+{
+    return _zeroYieldDayOnMidnight;
+}
+
+void InverterAbstract::setClearEventlogOnMidnight(const bool enabled)
+{
+    _clearEventlogOnMidnight = enabled;
+}
+
+bool InverterAbstract::getClearEventlogOnMidnight() const
+{
+    return _clearEventlogOnMidnight;
+}
+
+int8_t InverterAbstract::getLastRssi() const
+{
+    return _lastRssi;
+}
+
+bool InverterAbstract::sendChangeChannelRequest()
+{
+    return false;
+}
+
+HoymilesRadio* InverterAbstract::getRadio()
+{
+    return _radio;
+}
+
+AlarmLogParser* InverterAbstract::EventLog()
+{
+    return _alarmLogParser.get();
+}
+
+DevInfoParser* InverterAbstract::DevInfo()
+{
+    return _devInfoParser.get();
+}
+
+GridProfileParser* InverterAbstract::GridProfile()
+{
+    return _gridProfileParser.get();
+}
+
+PowerCommandParser* InverterAbstract::PowerCommand()
+{
+    return _powerCommandParser.get();
+}
+
+RfInfoParser* InverterAbstract::RfInfo()
+{
+    return _rfInfoParser.get();
+}
+
+StatisticsParser* InverterAbstract::Statistics()
+{
+    return _statisticsParser.get();
+}
+
+SystemConfigParaParser* InverterAbstract::SystemConfigPara()
+{
+    return _systemConfigParaParser.get();
+}
+
+void InverterAbstract::clearRxFragmentBuffer()
+{
+    memset(_rxFragmentBuffer, 0, MAX_RF_FRAGMENT_COUNT * sizeof(fragment_t));
+    _rxFragmentMaxPacketId = 0;
+    _rxFragmentLastPacketId = 0;
+    _rxFragmentRetransmitCnt = 0;
+}
+
+void InverterAbstract::addRxFragment(const uint8_t fragment[], const uint8_t len, const int8_t rssi, const uint8_t expectedMainCmd)
+{
+    _lastRssi = rssi;
+
+    if (len < 11) {
+        ESP_LOGE(TAG, "(%s, %d) fragment too short", __FILE__, __LINE__);
+        return;
+    }
+
+    if (len - 11 > MAX_RF_PAYLOAD_SIZE) {
+        ESP_LOGE(TAG, "FATAL: (%s, %d) fragment too large", __FILE__, __LINE__);
+        return;
+    }
+
+    // RF activity suppresses link searches without changing statistics-based reachability.
+    CmtLink.lastHeardMs = millis();
+    if (expectedMainCmd != 0 && fragment[0] != expectedMainCmd) {
+        ESP_LOGW(TAG, "Fragment with main command 0x%02X ignored, expected 0x%02X", fragment[0], expectedMainCmd);
+        return;
+    }
+
+    const uint8_t fragmentCount = fragment[9];
+
+    // Packets with 0x81 will be seen as 1
+    const uint8_t fragmentId = fragmentCount & 0b01111111; // fragmentId is 1 based
+
+    if (fragmentId == 0) {
+        ESP_LOGE(TAG, "Fragment id zero received and ignored");
+        return;
+    }
+
+    if (fragmentId >= MAX_RF_FRAGMENT_COUNT) {
+        ESP_LOGE(TAG, "Fragment id %" PRIu8 " is too large for buffer and ignored", fragmentId);
+        return;
+    }
+
+    memcpy(_rxFragmentBuffer[fragmentId - 1].fragment, &fragment[10], len - 11);
+    _rxFragmentBuffer[fragmentId - 1].len = len - 11;
+    _rxFragmentBuffer[fragmentId - 1].mainCmd = fragment[0];
+    _rxFragmentBuffer[fragmentId - 1].wasReceived = true;
+
+    if (fragmentId > _rxFragmentLastPacketId) {
+        _rxFragmentLastPacketId = fragmentId;
+    }
+
+    // 0b10000000 == 0x80
+    if ((fragmentCount & 0b10000000) == 0b10000000) {
+        _rxFragmentMaxPacketId = fragmentId;
+    }
+}
+
+// Returns Zero on Success or the Fragment ID for retransmit or error code
+uint8_t InverterAbstract::verifyAllFragments(CommandAbstract& cmd)
+{
+    // All missing
+    if (_rxFragmentLastPacketId == 0) {
+        ESP_LOGW(TAG, "All missing");
+        if (cmd.getSendCount() <= cmd.getMaxResendCount()) {
+            return FRAGMENT_ALL_MISSING_RESEND;
+        } else {
+            cmd.gotTimeout();
+            return FRAGMENT_ALL_MISSING_TIMEOUT;
+        }
+    }
+
+    if (cmd.acceptsSingleFragmentAnswer()) {
+        // The command doesn't rely on the 0x80 flag or gapless fragment
+        // numbering. Whatever was received last is treated as complete.
+        if (!cmd.handleResponse(_rxFragmentBuffer, _rxFragmentLastPacketId)) {
+            cmd.gotTimeout();
+            return FRAGMENT_HANDLE_ERROR;
+        }
+
+        return FRAGMENT_OK;
+    }
+
+    // Last fragment is missing (the one with 0x80)
+    if (_rxFragmentMaxPacketId == 0) {
+        ESP_LOGW(TAG, "Last missing");
+        if (_rxFragmentRetransmitCnt++ < cmd.getMaxRetransmitCount()) {
+            return _rxFragmentLastPacketId + 1;
+        } else {
+            cmd.gotTimeout();
+            return FRAGMENT_RETRANSMIT_TIMEOUT;
+        }
+    }
+
+    // Middle fragment is missing
+    for (uint8_t i = 0; i < _rxFragmentMaxPacketId - 1; i++) {
+        if (!_rxFragmentBuffer[i].wasReceived) {
+            ESP_LOGW(TAG, "Middle missing");
+            if (_rxFragmentRetransmitCnt++ < cmd.getMaxRetransmitCount()) {
+                return i + 1;
+            } else {
+                cmd.gotTimeout();
+                return FRAGMENT_RETRANSMIT_TIMEOUT;
+            }
+        }
+    }
+
+    if (!cmd.handleResponse(_rxFragmentBuffer, _rxFragmentMaxPacketId)) {
+        cmd.gotTimeout();
+        return FRAGMENT_HANDLE_ERROR;
+    }
+
+    return FRAGMENT_OK;
+}
+
+void InverterAbstract::performDailyTask()
+{
+    // Have to reset the offets first, otherwise it will
+    // Substract the offset from zero which leads to a high value
+    Statistics()->resetYieldDayCorrection();
+    Statistics()->zeroDailyRuntimeData();
+    if (getZeroYieldDayOnMidnight()) {
+        Statistics()->zeroDailyYieldData();
+    }
+    if (getClearEventlogOnMidnight()) {
+        EventLog()->clearBuffer();
+    }
+    resetRadioStats();
+}
+
+bool InverterAbstract::isTransactionComplete() const
+{
+    // The inverter marks the last fragment of a response with the 0x80 bit
+    // (stored in _rxFragmentMaxPacketId by addRxFragment()). Once this flag
+    // was seen and every fragment up to it has been received, the
+    // transaction is complete for sure and waiting for the rx timeout is
+    // pure latency.
+    if (_rxFragmentMaxPacketId == 0) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < _rxFragmentMaxPacketId; i++) {
+        if (!_rxFragmentBuffer[i].wasReceived) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void InverterAbstract::resetRadioStats()
+{
+    RadioStats = { };
+}
