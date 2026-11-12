@@ -34,7 +34,7 @@ Fusion porównuje swój numer wersji z najwyższym tagiem `fusion-vN` w tym repo
 ## Budowanie lokalnie
 
 ```
-git clone https://github.com/smoe/OpenDTU.git && cd OpenDTU
+git clone -b supporting_5000_MIT_8T https://github.com/smoe/OpenDTU.git && cd OpenDTU
 git checkout $(cat ../BASE_COMMIT)
 git am ../patches/*.patch
 pio run -e opendtufusionv2 -e opendtufusionv2_poe

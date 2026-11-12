@@ -1,4 +1,4 @@
-From a90083feefb45e997326cee429afc3aa4c5ae9ea Mon Sep 17 00:00:00 2001
+From 162fe13234b279c2e9c09494bb8aae19db3f1737 Mon Sep 17 00:00:00 2001
 From: okty111 <okty111@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 20:47:00 +0000
 Subject: [PATCH 7/7] Add GitHub release updater, Tuya cloud reporting and
@@ -634,7 +634,7 @@ index 0000000..9c76fc8
 +// firmware asset name inside a release: fusion-<pio env>.bin
 +#define FUSION_ASSET_NAME "fusion-" PIOENV ".bin"
 diff --git a/include/HistoryPage.h b/include/HistoryPage.h
-index 5cc7812..f68ead6 100644
+index 5cc7812..2b81c13 100644
 --- a/include/HistoryPage.h
 +++ b/include/HistoryPage.h
 @@ -32,7 +32,7 @@ th{color:var(--mu);font-weight:500;font-size:13px}
@@ -702,27 +702,27 @@ index 5cc7812..f68ead6 100644
 +// ---- zoom & pan (wheel, drag, pinch, buttons, double click = reset)
 +let Z={k:''},CH=null,rq=0;
 +const zkey=()=>per+':'+off;
-+function zdom(lo,hi,d0,d1,min,fmt){if(Z.k!==zkey())Z={k:zkey(),v0:d0,v1:d1};CH={lo,hi,d0,d1,min,fmt,draw:CH&&CH.draw};zclamp();return [Z.v0,Z.v1];}
++function zdom(lo,hi,d0,d1,min,fmt){if(Z.k!==zkey()||(!Z.u&&(Z.d0!==d0||Z.d1!==d1)))Z={k:zkey(),v0:d0,v1:d1,d0,d1,u:false};CH={lo,hi,d0,d1,min,fmt,draw:CH&&CH.draw};zclamp();return [Z.v0,Z.v1];}
 +function zclamp(){const {lo,hi,min}=CH;const sp=Math.max(min,Math.min(hi-lo,Z.v1-Z.v0));let a=Math.max(lo,Math.min(Z.v0,hi-sp));Z.v0=a;Z.v1=a+sp;}
 +const zoomed=()=>CH&&(Math.abs(Z.v0-CH.d0)>1e-6||Math.abs(Z.v1-CH.d1)>1e-6);
 +function zredraw(){if(rq)return;rq=requestAnimationFrame(()=>{rq=0;if(CH&&CH.draw)CH.draw();});}
-+function zoomAt(f,frac){if(!CH)return;const sp=Z.v1-Z.v0,c=Z.v0+sp*frac;Z.v0=c-sp*f*frac;Z.v1=Z.v0+sp*f;zclamp();zredraw();}
++function zoomAt(f,frac){if(!CH)return;Z.u=true;const sp=Z.v1-Z.v0,c=Z.v0+sp*frac;Z.v0=c-sp*f*frac;Z.v1=Z.v0+sp*f;zclamp();zredraw();}
 +function zui(){if(!CH)return;const z=zoomed();$('zRst').disabled=!z;$('zIn').disabled=Z.v1-Z.v0<=CH.min+1e-6;$('zOut').disabled=Z.v0<=CH.lo+1e-6&&Z.v1>=CH.hi-1e-6;$('zInfo').textContent=z?CH.fmt(Z.v0,Z.v1):'';$('chart').classList.toggle('zm',z);}
 +(function(){const box=$('chart'),P=new Map();let drag=null,pinch=null;
 +  const plot=()=>{const r=box.getBoundingClientRect(),L=CH&&CH.left||48;return {r,L,w:Math.max(1,r.width-4-L)};};
 +  const frac=x=>{const {r,L,w}=plot();return Math.max(0,Math.min(1,(x-r.left-L)/w));};
-+  box.addEventListener('wheel',e=>{if(!CH)return;if(Math.abs(e.deltaX)>Math.abs(e.deltaY)){e.preventDefault();const {w}=plot();Z.v0+=e.deltaX/w*(Z.v1-Z.v0);Z.v1+=e.deltaX/w*(Z.v1-Z.v0);zclamp();zredraw();return;}const full=Z.v0<=CH.lo+1e-6&&Z.v1>=CH.hi-1e-6,tiny=Z.v1-Z.v0<=CH.min+1e-6;if(e.deltaY>0&&full||e.deltaY<0&&tiny)return;e.preventDefault();zoomAt(e.deltaY<0?0.8:1.25,frac(e.clientX));},{passive:false});
++  box.addEventListener('wheel',e=>{if(!CH)return;if(Math.abs(e.deltaX)>Math.abs(e.deltaY)){e.preventDefault();const {w}=plot();Z.u=true;Z.v0+=e.deltaX/w*(Z.v1-Z.v0);Z.v1+=e.deltaX/w*(Z.v1-Z.v0);zclamp();zredraw();return;}const full=Z.v0<=CH.lo+1e-6&&Z.v1>=CH.hi-1e-6,tiny=Z.v1-Z.v0<=CH.min+1e-6;if(e.deltaY>0&&full||e.deltaY<0&&tiny)return;e.preventDefault();zoomAt(e.deltaY<0?0.8:1.25,frac(e.clientX));},{passive:false});
 +  box.addEventListener('pointerdown',e=>{if(!CH)return;P.set(e.pointerId,e.clientX);
 +    if(P.size===2){const xs=[...P.values()];pinch={d:Math.abs(xs[0]-xs[1])||1,c:frac((xs[0]+xs[1])/2),v0:Z.v0,v1:Z.v1};drag=null;}
 +    else if(P.size===1&&(e.pointerType!=='mouse'||e.button===0)){drag={x:e.clientX,v0:Z.v0,v1:Z.v1,moved:false,id:e.pointerId};}});
 +  box.addEventListener('pointermove',e=>{if(!P.has(e.pointerId))return;P.set(e.pointerId,e.clientX);
-+    if(pinch&&P.size===2){const xs=[...P.values()],d=Math.abs(xs[0]-xs[1])||1,sp=(pinch.v1-pinch.v0)*pinch.d/d,c=pinch.v0+(pinch.v1-pinch.v0)*pinch.c;Z.v0=c-sp*pinch.c;Z.v1=Z.v0+sp;zclamp();zredraw();e.preventDefault();return;}
++    if(pinch&&P.size===2){const xs=[...P.values()],d=Math.abs(xs[0]-xs[1])||1,sp=(pinch.v1-pinch.v0)*pinch.d/d,c=pinch.v0+(pinch.v1-pinch.v0)*pinch.c;Z.u=true;Z.v0=c-sp*pinch.c;Z.v1=Z.v0+sp;zclamp();zredraw();e.preventDefault();return;}
 +    if(drag){const dx=e.clientX-drag.x;if(!drag.moved&&Math.abs(dx)>5&&zoomed()){drag.moved=true;try{box.setPointerCapture(drag.id);}catch(x){}box.classList.add('pan');}
-+      if(drag.moved){const {w}=plot(),dv=-dx/w*(drag.v1-drag.v0);Z.v0=drag.v0+dv;Z.v1=drag.v1+dv;zclamp();zredraw();}}});
++      if(drag.moved){const {w}=plot(),dv=-dx/w*(drag.v1-drag.v0);Z.u=true;Z.v0=drag.v0+dv;Z.v1=drag.v1+dv;zclamp();zredraw();}}});
 +  const up=e=>{P.delete(e.pointerId);if(P.size<2)pinch=null;if(!P.size){drag=null;box.classList.remove('pan');}};
 +  box.addEventListener('pointerup',up);box.addEventListener('pointercancel',up);
-+  box.addEventListener('dblclick',()=>{if(!CH)return;Z.v0=CH.d0;Z.v1=CH.d1;zredraw();});
-+  $('zIn').onclick=()=>zoomAt(0.6,0.5);$('zOut').onclick=()=>zoomAt(1/0.6,0.5);$('zRst').onclick=()=>{if(CH){Z.v0=CH.d0;Z.v1=CH.d1;zredraw();}};
++  box.addEventListener('dblclick',()=>{if(!CH)return;Z.v0=CH.d0;Z.v1=CH.d1;Z.u=false;zredraw();});
++  $('zIn').onclick=()=>zoomAt(0.6,0.5);$('zOut').onclick=()=>zoomAt(1/0.6,0.5);$('zRst').onclick=()=>{if(CH){Z.v0=CH.d0;Z.v1=CH.d1;Z.u=false;zredraw();}};
 +})();
 +function clip(svg,left,top,W,bot){const id='cp'+Math.random().toString(36).slice(2,7);const c=el('clipPath',{id},el('defs',{},svg));el('rect',{x:left,y:top-2,width:W-4-left,height:bot-top+4},c);return el('g',{'clip-path':`url(#${id})`},svg);}
  function drawPower(d){

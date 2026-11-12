@@ -28,7 +28,7 @@ jobs:
           key: pio-${{ hashFiles('BASE_COMMIT') }}
       - name: OpenDTU + łatki Fusion
         run: |
-          git clone https://github.com/smoe/OpenDTU.git odtu
+          git clone -b supporting_5000_MIT_8T https://github.com/smoe/OpenDTU.git odtu
           cd odtu && git checkout "$(cat ../BASE_COMMIT)"
           git -c user.name=ci -c user.email=ci@localhost am ../patches/*.patch
       - name: Kompilacja
