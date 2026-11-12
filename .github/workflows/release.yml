@@ -51,6 +51,7 @@ jobs:
       - name: Wydanie
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" || true
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" out/* --clobber
           else
