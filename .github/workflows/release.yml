@@ -25,12 +25,15 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-${{ hashFiles('BASE_COMMIT') }}
-      - name: OpenDTU + łatki Fusion
-        run: |
-          git clone -b supporting_5000_MIT_8T https://github.com/smoe/OpenDTU.git odtu
-          cd odtu && git checkout "$(cat ../BASE_COMMIT)"
-          git -c user.name=ci -c user.email=ci@localhost am ../patches/*.patch
+          key: pio-${{ hashFiles('patches/*.patch') }}
+          restore-keys: pio-
+      - name: Baza OpenDTU (gałąź opendtu-base)
+        uses: actions/checkout@v4
+        with:
+          ref: opendtu-base
+          path: odtu
+      - name: Łatki Fusion
+        run: cd odtu && git -c user.name=ci -c user.email=ci@localhost am ../patches/*.patch
       - name: Kompilacja
         run: |
           pip install -U platformio

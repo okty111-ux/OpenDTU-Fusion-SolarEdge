@@ -26,7 +26,7 @@ Fusion porównuje swój numer wersji z najwyższym tagiem `fusion-vN` w tym repo
 
 ## Nowa wersja (dla autora)
 
-1. Zmiany w kodzie → nowa łatka w `patches/` (`git format-patch` z drzewa OpenDTU, baza w `BASE_COMMIT`).
+1. Zmiany w kodzie → nowa łatka w `patches/` (`git format-patch` względem gałęzi `opendtu-base`).
 2. `git tag -a fusion-v3 -m "opis zmian"` i `git push origin main fusion-v3`.
 3. GitHub Actions („Wydanie Fusion”) buduje oba warianty z `FUSION_VERSION=3` i publikuje wydanie.
    Opis z tagu trafia do opisu wydania i jest widoczny na stronie aktualizacji w Fusion.
@@ -34,8 +34,7 @@ Fusion porównuje swój numer wersji z najwyższym tagiem `fusion-vN` w tym repo
 ## Budowanie lokalnie
 
 ```
-git clone -b supporting_5000_MIT_8T https://github.com/smoe/OpenDTU.git && cd OpenDTU
-git checkout $(cat ../BASE_COMMIT)
+git clone -b opendtu-base https://github.com/okty111-ux/OpenDTU-Fusion-SolarEdge.git odtu && cd odtu
 git am ../patches/*.patch
 pio run -e opendtufusionv2 -e opendtufusionv2_poe
 ```
