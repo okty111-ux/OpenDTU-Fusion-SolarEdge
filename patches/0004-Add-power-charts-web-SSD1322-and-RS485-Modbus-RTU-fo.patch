@@ -1,0 +1,1119 @@
+From dbc13186963e4d49c9f00283d280ea1fff31f0e7 Mon Sep 17 00:00:00 2001
+From: okty111 <okty111@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 16:33:40 +0000
+Subject: [PATCH 4/7] Add power charts (web + SSD1322) and RS485 Modbus RTU for
+ SolarEdge
+
+- PowerLog: 5 min average power of Hoymiles and SolarEdge for today and
+  yesterday, persisted in LittleFS /power.bin; GET /api/history/power
+- /history: SVG power curve (today/yesterday) and stacked energy bars
+  (30 days, months, years), no external libraries
+- SSD1322: new page 'Wykres mocy - dzis' (stacked curve, peak, now marker),
+  page mask migrated to include it
+- SolarEdge: transport selectable Modbus TCP or Modbus RTU over the
+  Fusion v2 RS485 transceiver (GPIO16 R, 45 D, 46 DE, 15 RE_N), baud and
+  parity configurable; settings page updated
+
+Co-authored-by: Perplexity <noreply@perplexity.ai>
+---
+ include/FusionDisplay.h      |   2 +-
+ include/FusionDisplayPages.h |   8 ++
+ include/FusionPages.h        |  26 +++---
+ include/HistoryPage.h        | 101 ++++++++++++++++++++-
+ include/PowerLog.h           |  51 +++++++++++
+ include/SolarEdge.h          |  34 ++++++-
+ include/WebApi_solaredge.h   |   1 +
+ src/FusionDisplay.cpp        |  12 ++-
+ src/FusionDisplayPages.cpp   | 140 ++++++++++++++++++++++++++---
+ src/PowerLog.cpp             | 170 +++++++++++++++++++++++++++++++++++
+ src/SolarEdge.cpp            | 152 ++++++++++++++++++++++++++++++-
+ src/WebApi_solaredge.cpp     |  29 +++++-
+ src/main.cpp                 |   2 +
+ 13 files changed, 699 insertions(+), 29 deletions(-)
+ create mode 100644 include/PowerLog.h
+ create mode 100644 src/PowerLog.cpp
+
+diff --git a/include/FusionDisplay.h b/include/FusionDisplay.h
+index b27a2d0..9619f9a 100644
+--- a/include/FusionDisplay.h
++++ b/include/FusionDisplay.h
+@@ -46,7 +46,7 @@ struct FusionDisplayConfig {
+     uint16_t sleepMin = 10; // screen off at night after N min without button, 0 = never
+     uint8_t contrast = 160; // 0..255
+     bool flip = false;      // rotate 180°
+-    uint8_t pages = 0x7F;   // bit mask of enabled pages
++    uint8_t pages = 0xFF;   // bit mask of enabled pages
+ };
+ 
+ class FusionDisplayClass {
+diff --git a/include/FusionDisplayPages.h b/include/FusionDisplayPages.h
+index 831e843..dc1c8e6 100644
+--- a/include/FusionDisplayPages.h
++++ b/include/FusionDisplayPages.h
+@@ -8,9 +8,12 @@
+ #include "clib/u8g2.h"
+ 
+ #define FD_MAX_MPPT 8
++#define FD_CURVE_SLOTS 288 // 5 min slots per day
++#define FD_CURVE_NONE 0xFFFF
+ 
+ enum FdPage : uint8_t {
+     FD_PAGE_POWER = 0, // total production now + today
++    FD_PAGE_CHART,     // today's power curve (5 min averages)
+     FD_PAGE_GRID,      // SolarEdge meter: export/import
+     FD_PAGE_MPPT,      // Hoymiles MPPT U/I/P/today
+     FD_PAGE_PANELS,    // per-panel estimate
+@@ -59,6 +62,11 @@ struct FdData {
+     bool hasYesterday;
+     float yHoy, ySe, mHoy, mSe, yrHoy, yrSe, ltHoy, ltSe; // kWh, <0 unknown
+ 
++    // power curve of today (W per 5 min slot, FD_CURVE_NONE = no record)
++    uint16_t curveHoy[FD_CURVE_SLOTS];
++    uint16_t curveSe[FD_CURVE_SLOTS];
++    uint16_t curveSlot; // current slot
++
+     char ip[16];
+     char net[24];       // "Wi-Fi -61 dBm" / "Ethernet"
+     char sd[32];        // "29,7 GB, wolne 28,1 GB" / "brak karty"
+diff --git a/include/FusionPages.h b/include/FusionPages.h
+index 5181e01..2e2bada 100644
+--- a/include/FusionPages.h
++++ b/include/FusionPages.h
+@@ -194,18 +194,22 @@ footer{color:var(--mu);font-size:12px;text-align:center;padding:8px 0 24px}
+ </section>
+ 
+ <section>
+-  <h3>SolarEdge · Modbus TCP (SunSpec)</h3>
+-  <p class="sub">Falownik musi mieć włączony Modbus TCP w aplikacji SetApp: Commissioning → Site Communication → Modbus TCP.</p>
++  <h3>SolarEdge · Modbus SunSpec</h3>
++  <p class="sub">Wybierz, jak Fusion łączy się z falownikiem: przez sieć (Modbus TCP) albo przewodem RS485 (Modbus RTU) do złącza A/B na płytce Fusion.</p>
+   <div class="form">
+-    <div><label for="seHost">Adres IP falownika</label><input id="seHost" type="text" placeholder="192.168.1.50" autocomplete="off"><div class="hint">najlepiej stały adres z routera</div></div>
+-    <div><label for="sePort">Port</label><input id="sePort" type="number" min="1" max="65535"><div class="hint">domyślnie 1502 (czasem 502)</div></div>
++    <div><label for="seTr">Sposób komunikacji</label><select id="seTr" onchange="seMode()"><option value="tcp">Modbus TCP (LAN / Wi-Fi)</option><option value="rtu">RS485 (Modbus RTU)</option></select><div class="hint">RS485: złącze A/B na Fusion</div></div>
++    <div class="tcp"><label for="seHost">Adres IP falownika</label><input id="seHost" type="text" placeholder="192.168.1.50" autocomplete="off"><div class="hint">najlepiej stały adres z routera</div></div>
++    <div class="tcp"><label for="sePort">Port</label><input id="sePort" type="number" min="1" max="65535"><div class="hint">domyślnie 1502 (czasem 502)</div></div>
++    <div class="rtu"><label for="seBaud">Prędkość RS485</label><select id="seBaud"><option>115200</option><option>57600</option><option>38400</option><option>19200</option><option>9600</option></select><div class="hint">domyślnie w SolarEdge 115200</div></div>
++    <div class="rtu"><label for="sePar">Format ramki</label><select id="sePar"><option value="0">8N1 (bez parzystości)</option><option value="1">8E1 (parzystość)</option><option value="2">8O1 (nieparzystość)</option></select><div class="hint">domyślnie 8N1</div></div>
+     <div><label for="seUnit">Modbus ID (Device ID)</label><input id="seUnit" type="number" min="1" max="247"><div class="hint">domyślnie 1</div></div>
+-    <div><label for="seInt">Odczyt co [s]</label><input id="seInt" type="number" min="2" max="300"></div>
++    <div><label for="seInt">Odczyt co [s]</label><input id="seInt" type="number" min="2" max="300"><div class="hint">minimum 2 s</div></div>
+     <div><label class="chk"><input id="seEn" type="checkbox"> Odczyt włączony</label><label class="chk"><input id="seMeter" type="checkbox"> Licznik SolarEdge (eksport/import)</label></div>
+   </div>
+   <div class="actions"><button onclick="saveSe()">Zapisz i sprawdź połączenie</button><button class="sec" onclick="testSe()">Sprawdź połączenie</button></div>
+   <div id="seRes" class="result" style="display:none"></div>
+-  <div class="box">SolarEdge przyjmuje tylko jedno połączenie Modbus TCP naraz. Wyłącz inne programy łączące się z falownikiem (np. integrację Home Assistant).</div>
++  <div class="box tcp">SetApp: Commissioning → Site Communication → Modbus TCP → Enable (port 1502). SolarEdge przyjmuje tylko jedno połączenie Modbus TCP naraz. Wyłącz inne programy łączące się z falownikiem (np. integrację Home Assistant).</div>
++  <div class="box rtu">SetApp: Commissioning → Site Communication → RS485-1 (lub RS485-2, jeśli RS485-1 zajmuje licznik albo bateria) → Protocol: <b>SunSpec (Non-SE Logger)</b>, Device ID taki jak wyżej, Baud rate jak wyżej. Połącz A–A i B–B skrętką, masę (G) też. Na końcu długiej linii daj terminator 120 Ω. Falownik może mieć tylko jednego mastera Modbus: RS485 albo TCP, nie oba.</div>
+ </section>
+ 
+ <section>
+@@ -269,12 +273,14 @@ async function delInv(id,name){if(!confirm('Usunąć inwerter '+name+'?'))return
+ 
+ async function loadSe(){
+   const c=await get('/api/solaredge/config');
++  $('seTr').value=c.transport||'tcp';$('seBaud').value=String(c.baud||115200);$('sePar').value=String(c.parity||0);seMode();
+   $('seHost').value=c.host;$('sePort').value=c.port;$('seUnit').value=c.unit_id;$('seInt').value=c.interval;$('seEn').checked=c.enabled;$('seMeter').checked=c.read_meter;
+ }
++function seMode(){const rtu=$('seTr').value==='rtu';document.querySelectorAll('.tcp').forEach(e=>e.style.display=rtu?'none':'');document.querySelectorAll('.rtu').forEach(e=>e.style.display=rtu?'':'none');}
+ async function saveSe(){
+-  const host=$('seHost').value.trim();
+-  if(!/^[0-9A-Za-z.\-]{1,64}$/.test(host)){toast('Podaj adres IP lub nazwę falownika',false);return;}
+-  try{await post('/api/solaredge/config',{host,port:+$('sePort').value,unit_id:+$('seUnit').value,interval:+$('seInt').value,enabled:$('seEn').checked,read_meter:$('seMeter').checked});
++  const host=$('seHost').value.trim(),transport=$('seTr').value;
++  if(transport==='tcp'&&!/^[0-9A-Za-z.\-]{1,64}$/.test(host)){toast('Podaj adres IP lub nazwę falownika',false);return;}
++  try{await post('/api/solaredge/config',{transport,baud:+$('seBaud').value,parity:+$('sePar').value,host,port:+$('sePort').value,unit_id:+$('seUnit').value,interval:+$('seInt').value,enabled:$('seEn').checked,read_meter:$('seMeter').checked});
+     toast('Zapisano ustawienia SolarEdge');testSe(true);}catch(e){toast('Błąd: '+e.message,false);}
+ }
+ async function testSe(afterSave){
+@@ -284,7 +290,7 @@ async function testSe(afterSave){
+   for(;;){
+     let s;try{s=await get('/api/solaredge/status');}catch(e){r.className='result err';r.textContent='Brak odpowiedzi DTU';return;}
+     if(s.valid){r.className='result ok';r.innerHTML=`<b>Połączono</b> · ${esc(s.manufacturer)} ${esc(s.model)} · nr ser. ${esc(s.serial)} · wersja ${esc(s.version)}<br>Status: ${SE[s.status]||s.status_text} · moc AC ${Math.round(s.ac.power)} W · napięcie L1 ${s.ac.voltage_l1.toFixed(1)} V`+(s.meter?` · licznik: ${s.meter.power>=0?'eksport':'pobór'} ${Math.abs(Math.round(s.meter.power))} W`:'');return;}
+-    if(Date.now()-t0>20000){r.className='result err';r.innerHTML=`<b>Brak połączenia</b> · ${esc(s.last_error||'brak odpowiedzi')}<br>Sprawdź adres IP, port, czy Modbus TCP jest włączony w SetApp i czy nie łączy się inny program.`;return;}
++    if(Date.now()-t0>20000){r.className='result err';r.innerHTML=`<b>Brak połączenia</b> · ${esc(s.last_error||'brak odpowiedzi')}<br>`+($('seTr').value==='rtu'?'Sprawdź przewody A/B (spróbuj zamienić), Device ID, prędkość i czy port RS485 w SetApp ma protokół SunSpec (Non-SE Logger).':'Sprawdź adres IP, port, czy Modbus TCP jest włączony w SetApp i czy nie łączy się inny program.');return;}
+     await new Promise(x=>setTimeout(x,2000));
+   }
+ }
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 1a01996..43be472 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -48,6 +48,16 @@ tr.cur td{background:#2b6cb011}
+ .mu{color:var(--mu)}
+ .sm{display:none}
+ @media(max-width:640px){.sm{display:inline}.lg{display:none}}
++.chd{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}.chd h3{margin:0}
++.seg{display:inline-flex;border:1px solid var(--bd);border-radius:8px;overflow:hidden}.seg button{border:0;background:transparent;color:var(--mu);font:inherit;font-size:13px;padding:5px 12px;cursor:pointer}.seg button+button{border-left:1px solid var(--bd)}.seg button.on{background:var(--acc);color:#fff}
++.lgd{font-size:13px;color:var(--mu);display:flex;gap:14px;flex-wrap:wrap;margin:2px 0 4px}.lgd i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
++.ch{position:relative;width:100%;touch-action:pan-y}.ch svg{display:block;width:100%;overflow:visible}.ch text{fill:var(--mu);font-size:11px;font-variant-numeric:tabular-nums}
++.ch .gl{stroke:var(--bd);stroke-width:1}.ch .ax{stroke:var(--mu);stroke-width:1;opacity:.5}
++.tip{position:absolute;pointer-events:none;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:6px 9px;font-size:12px;line-height:1.4;box-shadow:0 4px 14px #0002;white-space:nowrap;display:none;z-index:2}
++.chs{font-size:13px;color:var(--mu);margin-top:6px}
++:root{--ch:#e58a12;--cs:#2f7fd0}
++@media (prefers-color-scheme:dark){:root{--ch:#f0a23a;--cs:#5aa2ea}.seg button.on{color:#0b1520}}
++section.chart{overflow:visible}
+ footer{color:var(--mu);font-size:12px;text-align:center;padding:8px 0 24px}
+ </style>
+ </head>
+@@ -62,6 +72,16 @@ footer{color:var(--mu);font-size:12px;text-align:center;padding:8px 0 24px}
+     <div class="card"><div class="l">Razem</div><div class="v" id="totW">–</div><div class="s" id="gridS"></div></div>
+   </div>
+ 
++  <section class="chart"><div class="chd"><h3>Moc w ciągu dnia</h3><div class="seg" id="pwSeg"><button data-d="0" class="on">Dziś</button><button data-d="1">Wczoraj</button></div></div>
++    <div class="lgd"><span><i style="background:var(--ch)"></i>Hoymiles</span><span><i style="background:var(--cs)"></i>SolarEdge</span><span class="mu" id="pwDate"></span></div>
++    <div class="ch" id="pw"></div><div class="chs" id="pwS"></div>
++  </section>
++
++  <section class="chart"><div class="chd"><h3>Produkcja energii</h3><div class="seg" id="enSeg"><button data-m="d" class="on">30 dni</button><button data-m="m">Miesiące</button><button data-m="y">Lata</button></div></div>
++    <div class="lgd"><span><i style="background:var(--ch)"></i>Hoymiles</span><span><i style="background:var(--cs)"></i>SolarEdge</span></div>
++    <div class="ch" id="en"></div><div class="chs" id="enS"></div>
++  </section>
++
+   <section id="mpptSec" style="display:none"><h3>Hoymiles · trackery MPPT</h3>
+     <p class="mu" style="margin:0 0 10px;font-size:13px">Inwerter mierzy cały string na każdym MPPT. Wiersze paneli (≈) to szacunek liczony z mocy Wp/Vmp podanych w <a href="/fusion/settings">ustawieniach</a>: przy połączeniu szeregowym prąd jest wspólny, a moc i napięcie dzielą się proporcjonalnie.</p>
+     <div style="overflow-x:auto"><table class="mt"><thead><tr><th>MPPT / panel</th><th>Napięcie</th><th>Prąd</th><th>Moc</th><th>Dziś</th><th class="lt">Łącznie</th></tr></thead><tbody id="mppt"></tbody></table></div>
+@@ -144,10 +164,87 @@ function render(h){
+   $('years').innerHTML=years.map((r,i)=>row(r.k,r,i===0?'cur':'')).join('')+row('Łącznie',h.lifetime||{},'sum');
+   $('foot').textContent=`Odświeżanie co 30 s · zapis do pamięci flash co ${h.save_interval_min} min i o północy`;
+ }
++
++// ------------------------------------------------------------ wykresy (SVG, bez bibliotek)
++const NS='http://www.w3.org/2000/svg';
++const el=(t,a,p)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e;};
++const fmtP=v=>v>=1000?(v/1000).toLocaleString('pl-PL',{minimumFractionDigits:1,maximumFractionDigits:1})+' kW':Math.round(v)+' W';
++const fmtE=v=>(+v).toLocaleString('pl-PL',{minimumFractionDigits:v<10?2:1,maximumFractionDigits:v<10?2:1})+' kWh';
++const hhmm=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
++function nice(max){if(!(max>0))max=1;const r=max/4,e=Math.pow(10,Math.floor(Math.log10(r)));for(const f of [1,1.5,2,2.5,3,4,5,6,8,10])if(f*e>=r-1e-9)return 4*f*e;return 40*e;}
++const dec=st=>Math.abs(st-Math.round(st))<1e-9?0:(Math.abs(st*10-Math.round(st*10))<1e-9?1:2);
++function frame(box,h){box.innerHTML='';const W=Math.max(260,box.clientWidth),H=h;const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,height:H},box);const tip=document.createElement('div');tip.className='tip';box.appendChild(tip);return {svg,W,H,tip};}
++function yAxis(svg,W,top,bot,left,ymax,fmt){for(let i=0;i<=4;i++){const v=ymax*i/4,y=bot-(bot-top)*i/4;el('line',{x1:left,x2:W-4,y1:y,y2:y,class:i?'gl':'ax'},svg);const t=el('text',{x:left-6,y:y+4,'text-anchor':'end'},svg);t.textContent=fmt(v);}}
++function showTip(box,tip,x,html){tip.innerHTML=html;tip.style.display='block';const bw=box.clientWidth,tw=tip.offsetWidth;let l=x+12;if(l+tw>bw)l=x-tw-12;if(l<0)l=0;tip.style.left=l+'px';tip.style.top='4px';}
++
++let pwDay=0,pwData=null,enMode='d',hist=null;
++function drawPower(){
++  const box=$('pw');const mob=box.clientWidth<480;const {svg,W,H,tip}=frame(box,mob?190:240);
++  const d=pwData;const hoy=d?d.hoy:[],se=d?d.se:[];const n=hoy.length||288,step=d?d.step_min:5;
++  let first=-1,last=-1,mx=0,mxI=-1,wh=0;
++  for(let i=0;i<n;i++){const a=hoy[i],b=se[i];if(a===null&&b===null)continue;const t=(a||0)+(b||0);if(t>0){if(first<0)first=i;last=i;}if(t>mx){mx=t;mxI=i;}wh+=t*step/60;}
++  const per=60/step;let h0=6,h1=20;
++  if(first>=0){h0=Math.max(0,Math.floor(first/per)-1);h1=Math.min(24,Math.ceil((last+1)/per)+1);if(h1-h0<8){const c=(h0+h1)/2;h0=Math.max(0,Math.floor(c-4));h1=Math.min(24,h0+8);}}
++  const left=mob?40:48,top=10,bot=H-22,x=i=>left+(W-4-left)*((i*step/60)-h0)/(h1-h0);
++  const ymax=nice(mx*1.05||1000);const pd=ymax>=2000?dec(ymax/4000):0;
++  yAxis(svg,W,top,bot,left,ymax,v=>v===0?'0':(ymax>=2000?(v/1000).toLocaleString('pl-PL',{minimumFractionDigits:pd,maximumFractionDigits:pd})+' kW':Math.round(v)+' W'));
++  const y=v=>bot-(bot-top)*Math.min(v,ymax)/ymax;
++  const ev=Math.max(1,Math.ceil((h1-h0)/(mob?6:12)));
++  for(let hh=h0;hh<=h1;hh+=ev){const xx=x(hh*per);el('line',{x1:xx,x2:xx,y1:bot,y2:bot+4,class:'ax'},svg);const t=el('text',{x:xx,y:H-6,'text-anchor':'middle'},svg);t.textContent=hh+':00';}
++  // ciągłe odcinki z danymi (przerwy = brak zapisu, np. DTU wyłączone)
++  const runs=[];let cur=null;
++  for(let i=Math.floor(h0*per);i<Math.min(n,h1*per);i++){const ok=!(hoy[i]===null&&se[i]===null)&&i<(d&&pwDay===0?d.slot+1:n);if(ok){if(!cur){cur=[];runs.push(cur);}cur.push(i);}else cur=null;}
++  for(const r of runs){
++    const lo=r.map(i=>[x(i),y(hoy[i]||0)]),hi=r.map(i=>[x(i),y((hoy[i]||0)+(se[i]||0))]);
++    const p=a=>a.map((q,k)=>(k?'L':'M')+q[0].toFixed(1)+' '+q[1].toFixed(1)).join('');
++    const base=`L${x(r[r.length-1]).toFixed(1)} ${bot}L${x(r[0]).toFixed(1)} ${bot}Z`;
++    el('path',{d:p(lo)+base,fill:'var(--ch)','fill-opacity':.75,stroke:'var(--ch)','stroke-width':1.2},svg);
++    el('path',{d:p(hi)+lo.slice().reverse().map(q=>'L'+q[0].toFixed(1)+' '+q[1].toFixed(1)).join('')+'Z',fill:'var(--cs)','fill-opacity':.7,stroke:'none'},svg);
++    el('path',{d:p(hi),fill:'none',stroke:'var(--cs)','stroke-width':1.4},svg);
++  }
++  if(first<0){const t=el('text',{x:(left+W)/2,y:(top+bot)/2,'text-anchor':'middle',style:'font-size:13px'},svg);t.textContent=d?'Brak produkcji w tym dniu':'Brak danych z DTU';}
++  if(d&&pwDay===0&&d.slot>=h0*per&&d.slot<=h1*per){const xx=x(d.slot);el('line',{x1:xx,x2:xx,y1:top,y2:bot,stroke:'var(--acc)','stroke-dasharray':'3 3'},svg);const t=el('text',{x:xx,y:top-1,'text-anchor':'middle',style:'fill:var(--acc)'},svg);t.textContent='teraz';}
++  const cl=el('line',{y1:top,y2:bot,stroke:'var(--tx)','stroke-opacity':.4,style:'display:none'},svg);
++  const pick=e=>{const r=svg.getBoundingClientRect(),px=(e.clientX-r.left)*W/r.width;let i=Math.round(((px-left)/(W-4-left)*(h1-h0)+h0)*per);i=Math.max(Math.floor(h0*per),Math.min(i,Math.min(n,h1*per)-1));
++    cl.setAttribute('x1',x(i));cl.setAttribute('x2',x(i));cl.style.display='';const a=hoy[i],b=se[i];
++    showTip(box,tip,(e.clientX-r.left),(a===null&&b===null)?`<b>${hhmm(i*step)}</b><br><span class="mu">brak zapisu</span>`:`<b>${hhmm(i*step)}–${hhmm(i*step+step)}</b><br><span style="color:var(--ch)">■</span> Hoymiles ${fmtP(a||0)}<br><span style="color:var(--cs)">■</span> SolarEdge ${fmtP(b||0)}<br>Razem <b>${fmtP((a||0)+(b||0))}</b>`);};
++  svg.addEventListener('pointermove',pick);svg.addEventListener('pointerdown',pick);svg.addEventListener('pointerleave',()=>{tip.style.display='none';cl.style.display='none';});
++  $('pwDate').textContent=d&&d.date?('· '+dayLabel(d.date)):'';
++  $('pwS').innerHTML=mx>0?`Szczyt <b>${fmtP(mx)}</b> o ${hhmm(mxI*step)} · z krzywej ~${fmtE(wh/1000)} · <span style="white-space:nowrap">średnia co 5 min</span>`:'Wykres zapisuje średnią moc co 5 minut (dziś i wczoraj, pamięć flash).';
++}
++function drawEnergy(){
++  const box=$('en');const mob=box.clientWidth<480;const {svg,W,H,tip}=frame(box,mob?190:230);
++  if(!hist){return;}
++  let rows,lab,lab2;
++  if(enMode==='d'){rows=(hist.days||[]).slice(-29).concat([hist.today]);lab=r=>r===hist.today?'dziś':String(+r.k.slice(8));lab2=r=>dayLabel(r.k);}
++  else if(enMode==='m'){rows=(hist.months||[]).slice(-(mob?12:24));lab=r=>MON[+r.k.slice(5)-1].slice(0,3);lab2=r=>monLabel(r.k);}
++  else{rows=(hist.years||[]).slice();lab=r=>r.k;lab2=r=>'rok '+r.k;}
++  rows=rows.filter(Boolean);
++  const left=mob?40:48,top=10,bot=H-22,n=Math.max(rows.length,1),slot=(W-4-left)/n,bw=Math.max(2,slot*0.72);
++  const mx=Math.max(0,...rows.map(r=>(+r.h||0)+(+r.s||0)));const ymax=nice(mx*1.05||1);const ed=dec(ymax/4);
++  yAxis(svg,W,top,bot,left,ymax,v=>v===0?'0':v.toLocaleString('pl-PL',{minimumFractionDigits:ed,maximumFractionDigits:ed}));
++  const y=v=>bot-(bot-top)*v/ymax;const every=Math.max(1,Math.ceil(n/(mob?8:16)));
++  rows.forEach((r,i)=>{const cx=left+slot*i+slot/2,h=+r.h||0,s=+r.s||0;
++    el('rect',{x:cx-bw/2,y:y(h),width:bw,height:Math.max(0,bot-y(h)),fill:'var(--ch)',rx:1.5},svg);
++    el('rect',{x:cx-bw/2,y:y(h+s),width:bw,height:Math.max(0,y(h)-y(h+s)),fill:'var(--cs)',rx:1.5},svg);
++    if(i===n-1||(i%every===0&&n-1-i>=every*0.7)){const t=el('text',{x:cx,y:H-6,'text-anchor':'middle'},svg);t.textContent=lab(r);}});
++  if(!rows.length){const t=el('text',{x:(left+W)/2,y:(top+bot)/2,'text-anchor':'middle',style:'font-size:13px'},svg);t.textContent='Brak zapisanych danych';}
++  const hl=el('rect',{y:top,height:bot-top,width:slot,fill:'var(--tx)','fill-opacity':.06,style:'display:none'},svg);
++  const pick=e=>{const b=svg.getBoundingClientRect(),px=(e.clientX-b.left)*W/b.width;const i=Math.floor((px-left)/slot);if(i<0||i>=rows.length){tip.style.display='none';hl.style.display='none';return;}
++    const r=rows[i];hl.setAttribute('x',left+slot*i);hl.style.display='';
++    showTip(box,tip,e.clientX-b.left,`<b>${lab2(r)}</b><br><span style="color:var(--ch)">■</span> Hoymiles ${fmtE(+r.h||0)}<br><span style="color:var(--cs)">■</span> SolarEdge ${fmtE(+r.s||0)}<br>Razem <b>${fmtE(sum(r))}</b>`);};
++  svg.addEventListener('pointermove',pick);svg.addEventListener('pointerdown',pick);svg.addEventListener('pointerleave',()=>{tip.style.display='none';hl.style.display='none';});
++  const tot=rows.reduce((a,r)=>a+sum(r),0);
++  $('enS').innerHTML=rows.length?`Suma ${fmtE(tot)} · średnio ${fmtE(tot/rows.length)} na ${enMode==='d'?'dzień':enMode==='m'?'miesiąc':'rok'} · najlepszy ${fmtE(mx)}`:'';
++}
++async function loadPower(){try{const r=await fetch('/api/history/power?day='+pwDay);if(r.ok){pwData=await r.json();}}catch(e){}drawPower();}
++document.querySelectorAll('#pwSeg button').forEach(b=>b.onclick=()=>{document.querySelectorAll('#pwSeg button').forEach(x=>x.classList.toggle('on',x===b));pwDay=+b.dataset.d;pwData=null;loadPower();});
++document.querySelectorAll('#enSeg button').forEach(b=>b.onclick=()=>{document.querySelectorAll('#enSeg button').forEach(x=>x.classList.toggle('on',x===b));enMode=b.dataset.m;drawEnergy();});
++let rsT;window.addEventListener('resize',()=>{clearTimeout(rsT);rsT=setTimeout(()=>{drawPower();drawEnergy();},150);});
+ async function load(){
+-  try{const r=await fetch('/api/history');if(r.ok)render(await r.json());}catch(e){$('now').textContent='brak połączenia z DTU';}
++  try{const r=await fetch('/api/history');if(r.ok){hist=await r.json();render(hist);drawEnergy();}}catch(e){$('now').textContent='brak połączenia z DTU';}
+ }
+-load();setInterval(load,30000);
++load();loadPower();setInterval(load,30000);setInterval(()=>{if(pwDay===0)loadPower();},60000);
+ </script>
+ </body>
+ </html>
+diff --git a/include/PowerLog.h b/include/PowerLog.h
+new file mode 100644
+index 0000000..ec2c48d
+--- /dev/null
++++ b/include/PowerLog.h
+@@ -0,0 +1,51 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Power curve for charts: average Hoymiles / SolarEdge AC power per 5 minutes
++ * for today and yesterday (2 x 288 slots). Survives power loss: LittleFS
++ * /power.bin, written every 10 minutes and at midnight (tmp file + rename).
++ */
++#pragma once
++
++#include <Arduino.h>
++#include <ArduinoJson.h>
++#include <TaskSchedulerDeclarations.h>
++#include <mutex>
++
++#define POWERLOG_STEP_MIN 5
++#define POWERLOG_SLOTS (24 * 60 / POWERLOG_STEP_MIN)
++#define POWERLOG_NONE 0xFFFF
++
++struct PowerDay {
++    char date[11] = { 0 };
++    uint16_t hoy[POWERLOG_SLOTS];
++    uint16_t se[POWERLOG_SLOTS];
++    void clear();
++};
++
++class PowerLogClass {
++public:
++    PowerLogClass();
++    void init(Scheduler& scheduler);
++    // which: 0 = today, 1 = yesterday
++    void toJson(JsonObject root, uint8_t which);
++    // copies today's curve in W, POWERLOG_NONE = no data
++    void getToday(uint16_t* hoy, uint16_t* se, size_t n, uint16_t& currentSlot);
++    void reset();
++
++private:
++    void loop();
++    bool load();
++    bool save();
++    void closeSlot();
++
++    std::mutex _mutex;
++    PowerDay _today, _yesterday;
++    int _slot = -1;
++    float _sumHoy = 0, _sumSe = 0;
++    uint16_t _n = 0;
++    uint32_t _lastSave = 0;
++    bool _dirty = false;
++    Task _loopTask;
++};
++
++extern PowerLogClass PowerLog;
+diff --git a/include/SolarEdge.h b/include/SolarEdge.h
+index eca5719..511bf94 100644
+--- a/include/SolarEdge.h
++++ b/include/SolarEdge.h
+@@ -1,6 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ /*
+- * SolarEdge SunSpec Modbus-TCP reader for OpenDTU (Fusion)
++ * SolarEdge SunSpec Modbus reader (TCP or RTU/RS485) for OpenDTU (Fusion)
+  */
+ #pragma once
+ 
+@@ -24,7 +24,31 @@
+ #define SOLAREDGE_DEFAULT_METER false      // read Meter 1 (SE energy meter)
+ #endif
+ 
++// Fusion v2 RS485 transceiver (hardwired, see OpenDTUFusionDocs):
++//   GPIO16 = R (receiver out -> ESP RX), GPIO45 = D (driver in <- ESP TX)
++//   GPIO46 = DE (driver enable, active high), GPIO15 = RE_N (receiver enable, active low)
++#ifndef SOLAREDGE_RS485_RX
++#define SOLAREDGE_RS485_RX 16
++#endif
++#ifndef SOLAREDGE_RS485_TX
++#define SOLAREDGE_RS485_TX 45
++#endif
++#ifndef SOLAREDGE_RS485_DE
++#define SOLAREDGE_RS485_DE 46
++#endif
++#ifndef SOLAREDGE_RS485_RE_N
++#define SOLAREDGE_RS485_RE_N 15
++#endif
++
++enum SolarEdgeTransport : uint8_t {
++    SE_TRANSPORT_TCP = 0, // Modbus TCP over LAN/WiFi
++    SE_TRANSPORT_RTU = 1, // Modbus RTU over RS485
++};
++
+ struct SolarEdgeConfig {
++    uint8_t transport = SE_TRANSPORT_TCP;
++    uint32_t baud = 115200; // SolarEdge default, 9600..115200
++    uint8_t parity = 0; // 0 = 8N1, 1 = 8E1, 2 = 8O1
+     String host = SOLAREDGE_DEFAULT_HOST;
+     uint16_t port = SOLAREDGE_DEFAULT_PORT;
+     uint8_t unitId = SOLAREDGE_DEFAULT_UNIT;
+@@ -79,6 +103,14 @@ private:
+     void pollLoop();
+     bool pollOnce(SolarEdgeData& d, const SolarEdgeConfig& cfg);
+     bool readRegisters(const SolarEdgeConfig& cfg, uint16_t addr, uint16_t count, uint16_t* out);
++    bool readRegistersTcp(const SolarEdgeConfig& cfg, uint16_t addr, uint16_t count, uint16_t* out);
++    bool readRegistersRtu(const SolarEdgeConfig& cfg, uint16_t addr, uint16_t count, uint16_t* out);
++    void rs485Begin(const SolarEdgeConfig& cfg);
++    void rs485End();
++    bool _rs485Open = false;
++    String _linkError;
++    uint32_t _rs485Baud = 0;
++    uint8_t _rs485Parity = 0xFF;
+ 
+     void loadConfig();
+     bool saveConfig();
+diff --git a/include/WebApi_solaredge.h b/include/WebApi_solaredge.h
+index 47cd973..c146074 100644
+--- a/include/WebApi_solaredge.h
++++ b/include/WebApi_solaredge.h
+@@ -15,4 +15,5 @@ private:
+     void onHistoryPage(AsyncWebServerRequest* request);
+     void onHistoryGet(AsyncWebServerRequest* request);
+     void onHistoryReset(AsyncWebServerRequest* request);
++    void onPowerGet(AsyncWebServerRequest* request);
+ };
+diff --git a/src/FusionDisplay.cpp b/src/FusionDisplay.cpp
+index 8a4afef..0cbd3e9 100644
+--- a/src/FusionDisplay.cpp
++++ b/src/FusionDisplay.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ #include "FusionDisplay.h"
++#include "PowerLog.h"
+ #include "Datastore.h"
+ #include "EnergyHistory.h"
+ #include "FusionDisplayPages.h"
+@@ -183,7 +184,11 @@ void FusionDisplayClass::loadConfig()
+         _cfg.sleepMin = doc["sleep_min"] | 10;
+         _cfg.contrast = doc["contrast"] | 160;
+         _cfg.flip = doc["flip"] | false;
+-        _cfg.pages = doc["pages"] | 0x7F;
++        _cfg.pages = doc["pages"] | 0xFF;
++        if ((doc["pv"] | 1) < 2) { // v1 had no chart page (bit 1): shift bits up, enable chart
++            const uint8_t m = _cfg.pages;
++            _cfg.pages = (m & 1) | 0x02 | ((m & 0x7E) << 1);
++        }
+     }
+     f.close();
+ }
+@@ -197,6 +202,7 @@ bool FusionDisplayClass::saveConfig()
+     doc["contrast"] = _cfg.contrast;
+     doc["flip"] = _cfg.flip;
+     doc["pages"] = _cfg.pages;
++    doc["pv"] = 2;
+     File f = LittleFS.open(CFG_FILE, "w");
+     if (!f) return false;
+     const bool ok = serializeJson(doc, f) > 0;
+@@ -320,11 +326,13 @@ void FusionDisplayClass::collect(FdData& d)
+         strftime(d.date, sizeof(d.date), "%d.%m.%Y", &t);
+     }
+ 
++    PowerLog.getToday(d.curveHoy, d.curveSe, FD_CURVE_SLOTS, d.curveSlot);
++
+     d.hoyW = Datastore.getTotalAcPowerEnabled();
+     d.hoyReachable = Datastore.getIsAtLeastOneReachable();
+     const SolarEdgeData se = SolarEdge.getData();
+     const SolarEdgeConfig sc = SolarEdge.getConfig();
+-    d.seConfigured = sc.enabled && sc.host.length() > 0;
++    d.seConfigured = sc.enabled && (sc.transport == SE_TRANSPORT_RTU || sc.host.length() > 0);
+     d.seValid = se.valid;
+     d.seW = se.valid ? se.acPower : 0;
+     d.meterValid = se.valid && se.meterValid;
+diff --git a/src/FusionDisplayPages.cpp b/src/FusionDisplayPages.cpp
+index 4df98df..774ab29 100644
+--- a/src/FusionDisplayPages.cpp
++++ b/src/FusionDisplayPages.cpp
+@@ -12,7 +12,7 @@
+ #define FONT_BIG u8g2_font_helvB24_te
+ 
+ static const char* const TITLES[FD_PAGE_COUNT] = {
+-    "Produkcja", "Sieć", "Hoymiles MPPT", "Panele (szacunek)", "SolarEdge", "Historia", "Status"
++    "Produkcja", "Wykres mocy - dziś", "Sieć", "Hoymiles MPPT", "Panele (szacunek)", "SolarEdge", "Historia", "Status"
+ };
+ 
+ const char* fdPageTitle(uint8_t page) { return page < FD_PAGE_COUNT ? TITLES[page] : ""; }
+@@ -198,7 +198,7 @@ static void pageSolarEdge(u8g2_t* u, const FdData& d)
+     char b[32];
+     u8g2_SetFont(u, FONT_ROW);
+     if (!d.seValid) {
+-        txt(u, 0, ROW_Y[0], "Brak połączenia Modbus TCP");
++        txt(u, 0, ROW_Y[0], "Brak połączenia Modbus");
+         txt(u, 0, ROW_Y[1], "Sprawdź IP i port w ustawieniach");
+         return;
+     }
+@@ -251,6 +251,126 @@ static void pageStatus(u8g2_t* u, const FdData& d)
+     kvRow(u, 0, W, ROW_Y[3], "Inwertery", b);
+ }
+ 
++
++// ---------- power curve ----------
++static void hatchPix(u8g2_t* u, int x, int y0, int y1)
++{
++    // SolarEdge share: 50 % dither, so the two sources are distinguishable on a mono OLED
++    for (int y = y0; y <= y1; y++) if (((x + y) & 1) == 0) u8g2_DrawPixel(u, x, y);
++}
++
++static void pageChart(u8g2_t* u, const FdData& d)
++{
++    const int X0 = 54, X1 = W - 1, TOP = 15, BOT = 53; // plot area
++    const int PW = X1 - X0 + 1;
++    const int per = 12; // slots per hour
++    int first = -1, last = -1, peakI = -1;
++    uint32_t peak = 0;
++    float wh = 0;
++    for (int i = 0; i < FD_CURVE_SLOTS; i++) {
++        const uint16_t a = d.curveHoy[i], s = d.curveSe[i];
++        if (a == FD_CURVE_NONE && s == FD_CURVE_NONE) continue;
++        const uint32_t t = (a == FD_CURVE_NONE ? 0 : a) + (s == FD_CURVE_NONE ? 0 : s);
++        if (t > 0) { if (first < 0) first = i; last = i; }
++        if (t > peak) { peak = t; peakI = i; }
++        wh += t * 5.0f / 60.0f;
++    }
++    // time window: data +-1 h, at least 8 h, default 06-20
++    int h0 = 6, h1 = 20;
++    if (first >= 0) {
++        h0 = first / per - 1; if (h0 < 0) h0 = 0;
++        h1 = (last + per) / per + 1; if (h1 > 24) h1 = 24;
++        if (h1 - h0 < 8) { int c = (h0 + h1) / 2; h0 = c - 4; if (h0 < 0) h0 = 0; h1 = h0 + 8; if (h1 > 24) { h1 = 24; h0 = 16; } }
++    }
++    const int s0 = h0 * per, sN = (h1 - h0) * per;
++
++    // scale: 1 / 1,5 / 2 / 2,5 / 3 / 4 / 5 / 6 / 8 / 10 x 10^n
++    float ymax = 1000;
++    if (peak > 0) {
++        const float r = peak * 1.05f;
++        float e = powf(10.0f, floorf(log10f(r)));
++        static const float F[] = { 1, 1.5f, 2, 2.5f, 3, 4, 5, 6, 8, 10 };
++        for (float f : F) if (f * e >= r) { ymax = f * e; break; }
++    }
++
++    // left column
++    char b[24], c[24];
++    u8g2_SetFont(u, FONT_SMALL);
++    txt(u, 0, 22, "Szczyt");
++    u8g2_SetFont(u, FONT_SMALLB);
++    fpow(b, sizeof(b), (float)peak);
++    txt(u, 0, 32, peak ? b : "-");
++    u8g2_SetFont(u, FONT_SMALL);
++    if (peakI >= 0 && peak) { snprintf(b, sizeof(b), "o %02d:%02d", peakI / 12, (peakI % 12) * 5); txt(u, 0, 42, b); }
++    fkwh(c, sizeof(c), (d.todayHoy >= 0 || d.todaySe >= 0) ? sum2(d.todayHoy, d.todaySe) : wh / 1000.0f);
++    txt(u, 0, 53, c);
++
++    // grid: dotted top / half lines, scale label right
++    for (int x = X0; x <= X1; x += 3) { u8g2_DrawPixel(u, x, TOP); u8g2_DrawPixel(u, x, (TOP + BOT) / 2); }
++    if (ymax >= 1000) {
++        const float k = ymax / 1000.0f;
++        if (fabsf(k - roundf(k)) < 0.01f) snprintf(b, sizeof(b), "%d kW", (int)roundf(k));
++        else { snprintf(b, sizeof(b), "%.1f kW", k); for (char* p = b; *p; p++) if (*p == '.') *p = ','; }
++    } else snprintf(b, sizeof(b), "%d W", (int)ymax);
++    {
++        const int bw = u8g2_GetUTF8Width(u, b);
++        u8g2_SetDrawColor(u, 0); u8g2_DrawBox(u, X1 - bw - 1, TOP - 1, bw + 2, 9); u8g2_SetDrawColor(u, 1);
++        txt(u, X1 - bw, TOP + 7, b);
++    }
++
++    // curve (column by column; hoy = solid, SolarEdge = dither on top, outline solid)
++    int prevTop = -1;
++    for (int x = 0; x < PW; x++) {
++        const int sa = s0 + x * sN / PW;
++        int se_ = s0 + (x + 1) * sN / PW; if (se_ <= sa) se_ = sa + 1;
++        if (sa >= FD_CURVE_SLOTS) break;
++        if (sa > (int)d.curveSlot) { prevTop = -1; continue; } // future
++        uint32_t ha = 0, sa2 = 0; int n = 0;
++        for (int i = sa; i < se_ && i < FD_CURVE_SLOTS; i++) {
++            if (d.curveHoy[i] == FD_CURVE_NONE && d.curveSe[i] == FD_CURVE_NONE) continue;
++            ha += d.curveHoy[i] == FD_CURVE_NONE ? 0 : d.curveHoy[i];
++            sa2 += d.curveSe[i] == FD_CURVE_NONE ? 0 : d.curveSe[i];
++            n++;
++        }
++        if (!n) { prevTop = -1; continue; }
++        const float hv = (float)ha / n, sv = (float)sa2 / n;
++        int yh = BOT - (int)lroundf((BOT - TOP) * fminf(hv, ymax) / ymax);
++        int yt = BOT - (int)lroundf((BOT - TOP) * fminf(hv + sv, ymax) / ymax);
++        const int px = X0 + x;
++        if (yh < BOT) u8g2_DrawVLine(u, px, yh, BOT - yh);
++        if (yt < yh) hatchPix(u, px, yt, yh - 1);
++        // outline of total, connected to previous column
++        if (prevTop >= 0) {
++            const int a = prevTop < yt ? prevTop : yt, z = prevTop < yt ? yt : prevTop;
++            u8g2_DrawVLine(u, px, a, z - a + 1);
++        } else u8g2_DrawPixel(u, px, yt);
++        prevTop = yt;
++    }
++
++    // axis + hour labels
++    u8g2_DrawHLine(u, X0, BOT, PW);
++    const int span = h1 - h0, every = span > 12 ? 3 : 2;
++    for (int hh = h0; hh <= h1; hh++) {
++        const int x = X0 + (hh - h0) * (PW - 1) / span;
++        u8g2_DrawVLine(u, x, BOT, 2);
++        if (hh % every == 0 && hh < h1) {
++            snprintf(b, sizeof(b), "%d", hh);
++            const int bw = u8g2_GetUTF8Width(u, b);
++            int lx = x - bw / 2; if (lx < X0) lx = X0;
++            txt(u, lx, 63, b);
++        }
++    }
++    // "now" marker
++    if (d.timeValid && (int)d.curveSlot >= s0 && (int)d.curveSlot <= s0 + sN) {
++        const int x = X0 + ((int)d.curveSlot - s0) * PW / sN;
++        for (int y = TOP + 9; y < BOT; y += 2) u8g2_DrawPixel(u, x, y);
++    }
++    if (first < 0) {
++        u8g2_SetDrawColor(u, 0); u8g2_DrawBox(u, X0 + 40, 26, PW - 80, 14); u8g2_SetDrawColor(u, 1);
++        ctxt(u, X0 + PW / 2, 36, d.timeValid ? "Dziś brak produkcji" : "Brak czasu (NTP)");
++    }
++}
++
+ bool fdPageAvailable(const FdData& d, uint8_t page)
+ {
+     switch (page) {
+@@ -260,6 +380,7 @@ bool fdPageAvailable(const FdData& d, uint8_t page)
+         for (uint8_t k = 0; k < d.mpptCount; k++) if (d.mppt[k].panelCount > 1) return true;
+         return false;
+     case FD_PAGE_SOLAREDGE: return d.seConfigured;
++    case FD_PAGE_CHART: return d.timeValid;
+     default: return page < FD_PAGE_COUNT;
+     }
+ }
+@@ -271,6 +392,7 @@ void fdRenderPage(u8g2_t* u, const FdData& d, uint8_t page, uint8_t no, uint8_t
+     header(u, d, page, no, cnt, autoRotate);
+     switch (page) {
+     case FD_PAGE_POWER: pagePower(u, d); break;
++    case FD_PAGE_CHART: pageChart(u, d); break;
+     case FD_PAGE_GRID: pageGrid(u, d); break;
+     case FD_PAGE_MPPT: pageMppt(u, d); break;
+     case FD_PAGE_PANELS: pagePanels(u, d); break;
+@@ -282,16 +404,14 @@ void fdRenderPage(u8g2_t* u, const FdData& d, uint8_t page, uint8_t no, uint8_t
+ 
+ void fdRenderOverlay(u8g2_t* u, const char* l1, const char* l2)
+ {
+-    const int bw = 170, bh = l2 ? 36 : 22, bx = (W - bw) / 2, by = (64 - bh) / 2;
++    // clear content area below the header, then a centered message
+     u8g2_SetDrawColor(u, 0);
+-    u8g2_DrawBox(u, bx, by, bw, bh);
++    u8g2_DrawBox(u, 0, 12, W, 52);
+     u8g2_SetDrawColor(u, 1);
+-    u8g2_DrawFrame(u, bx, by, bw, bh);
+-    u8g2_DrawFrame(u, bx + 2, by + 2, bw - 4, bh - 4);
+-    u8g2_SetFont(u, FONT_SMALLB);
+-    ctxt(u, W / 2, by + 15, l1);
++    u8g2_SetFont(u, FONT_MID);
++    ctxt(u, W / 2, l2 ? 34 : 42, l1);
+     if (l2) {
+-        u8g2_SetFont(u, FONT_SMALL);
+-        ctxt(u, W / 2, by + 28, l2);
++        u8g2_SetFont(u, FONT_ROW);
++        ctxt(u, W / 2, 54, l2);
+     }
+ }
+diff --git a/src/PowerLog.cpp b/src/PowerLog.cpp
+new file mode 100644
+index 0000000..110fe34
+--- /dev/null
++++ b/src/PowerLog.cpp
+@@ -0,0 +1,170 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "PowerLog.h"
++#include "Datastore.h"
++#include "SolarEdge.h"
++#include <LittleFS.h>
++#include <time.h>
++
++#undef TAG
++static const char* TAG = "powerlog";
++static const char* FILE_NAME = "/power.bin";
++static const char* TMP_NAME = "/power.tmp";
++static const uint32_t MAGIC = 0x50574C31; // "PWL1"
++
++PowerLogClass PowerLog;
++
++void PowerDay::clear()
++{
++    date[0] = 0;
++    for (int i = 0; i < POWERLOG_SLOTS; i++) hoy[i] = se[i] = POWERLOG_NONE;
++}
++
++PowerLogClass::PowerLogClass()
++    : _loopTask(10 * TASK_SECOND, TASK_FOREVER, std::bind(&PowerLogClass::loop, this))
++{
++    _today.clear();
++    _yesterday.clear();
++}
++
++void PowerLogClass::init(Scheduler& scheduler)
++{
++    load();
++    scheduler.addTask(_loopTask);
++    _loopTask.enable();
++}
++
++static uint16_t clampW(float w)
++{
++    if (w < 0) w = 0;
++    if (w > 65000) w = 65000;
++    return (uint16_t)lroundf(w);
++}
++
++void PowerLogClass::closeSlot()
++{
++    if (_slot < 0 || _n == 0) return;
++    _today.hoy[_slot] = clampW(_sumHoy / _n);
++    _today.se[_slot] = clampW(_sumSe / _n);
++    _dirty = true;
++}
++
++void PowerLogClass::loop()
++{
++    struct tm t;
++    if (!getLocalTime(&t, 5) || t.tm_year < (2024 - 1900)) return;
++    char date[11];
++    strftime(date, sizeof(date), "%Y-%m-%d", &t);
++    const int slot = (t.tm_hour * 60 + t.tm_min) / POWERLOG_STEP_MIN;
++
++    const float hoyW = Datastore.getTotalAcPowerEnabled();
++    const SolarEdgeData d = SolarEdge.getData();
++    const float seW = d.valid ? d.acPower : 0;
++
++    std::lock_guard<std::mutex> lock(_mutex);
++    if (strcmp(_today.date, date) != 0) {
++        if (_today.date[0]) {
++            closeSlot();
++            _yesterday = _today;
++        }
++        _today.clear();
++        strlcpy(_today.date, date, sizeof(_today.date));
++        _slot = -1;
++        _n = 0;
++        _dirty = true;
++        _lastSave = 0; // save right after midnight
++    }
++    if (slot != _slot) {
++        closeSlot();
++        _slot = slot;
++        _sumHoy = _sumSe = 0;
++        _n = 0;
++    }
++    _sumHoy += hoyW;
++    _sumSe += seW;
++    _n++;
++    // live value of the running slot
++    _today.hoy[_slot] = clampW(_sumHoy / _n);
++    _today.se[_slot] = clampW(_sumSe / _n);
++
++    if (_dirty && (_lastSave == 0 || millis() - _lastSave > 10 * 60 * 1000UL)) {
++        if (save()) {
++            _dirty = false;
++            _lastSave = millis();
++        }
++    }
++}
++
++bool PowerLogClass::save()
++{
++    File f = LittleFS.open(TMP_NAME, "w");
++    if (!f) return false;
++    bool ok = f.write((const uint8_t*)&MAGIC, 4) == 4;
++    ok &= f.write((const uint8_t*)&_today, sizeof(PowerDay)) == sizeof(PowerDay);
++    ok &= f.write((const uint8_t*)&_yesterday, sizeof(PowerDay)) == sizeof(PowerDay);
++    f.close();
++    if (!ok) {
++        LittleFS.remove(TMP_NAME);
++        return false;
++    }
++    LittleFS.remove(FILE_NAME);
++    return LittleFS.rename(TMP_NAME, FILE_NAME);
++}
++
++bool PowerLogClass::load()
++{
++    File f = LittleFS.open(FILE_NAME, "r");
++    if (!f) return false;
++    uint32_t magic = 0;
++    PowerDay* a = new PowerDay();
++    PowerDay* b = new PowerDay();
++    bool ok = f.read((uint8_t*)&magic, 4) == 4 && magic == MAGIC
++        && f.read((uint8_t*)a, sizeof(PowerDay)) == sizeof(PowerDay)
++        && f.read((uint8_t*)b, sizeof(PowerDay)) == sizeof(PowerDay);
++    f.close();
++    if (ok) {
++        a->date[10] = 0;
++        b->date[10] = 0;
++        std::lock_guard<std::mutex> lock(_mutex);
++        _today = *a; // if the date is old, loop() moves it to "yesterday"
++        _yesterday = *b;
++        ESP_LOGI(TAG, "loaded %s / %s", _today.date, _yesterday.date);
++    }
++    delete a;
++    delete b;
++    return ok;
++}
++
++void PowerLogClass::toJson(JsonObject root, uint8_t which)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    const PowerDay& d = which ? _yesterday : _today;
++    root["date"] = d.date;
++    root["step_min"] = POWERLOG_STEP_MIN;
++    if (!which) root["slot"] = _slot;
++    auto h = root["hoy"].to<JsonArray>();
++    auto s = root["se"].to<JsonArray>();
++    for (int i = 0; i < POWERLOG_SLOTS; i++) {
++        if (d.hoy[i] == POWERLOG_NONE) h.add(nullptr); else h.add(d.hoy[i]);
++        if (d.se[i] == POWERLOG_NONE) s.add(nullptr); else s.add(d.se[i]);
++    }
++}
++
++void PowerLogClass::getToday(uint16_t* hoy, uint16_t* se, size_t n, uint16_t& currentSlot)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    for (size_t i = 0; i < n && i < POWERLOG_SLOTS; i++) {
++        hoy[i] = _today.hoy[i];
++        se[i] = _today.se[i];
++    }
++    currentSlot = _slot < 0 ? 0 : _slot;
++}
++
++void PowerLogClass::reset()
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    _today.clear();
++    _yesterday.clear();
++    _slot = -1;
++    _n = 0;
++    LittleFS.remove(FILE_NAME);
++}
+diff --git a/src/SolarEdge.cpp b/src/SolarEdge.cpp
+index 5071b21..a2489f5 100644
+--- a/src/SolarEdge.cpp
++++ b/src/SolarEdge.cpp
+@@ -12,6 +12,7 @@
+ #include "NetworkSettings.h"
+ #include <ArduinoJson.h>
+ #include <LittleFS.h>
++#include <HardwareSerial.h>
+ #if __has_include(<NetworkClient.h>)
+ #include <NetworkClient.h> // Arduino-ESP32 3.x (WiFi + Ethernet)
+ #else
+@@ -28,6 +29,7 @@ static const char* TAG = "solaredge";
+ SolarEdgeClass SolarEdge;
+ 
+ static NetworkClient seClient;
++static HardwareSerial seSerial(1); // UART1, free on Fusion
+ 
+ SolarEdgeClass::SolarEdgeClass()
+     : _mqttTask(TASK_SECOND * 10, TASK_FOREVER, std::bind(&SolarEdgeClass::mqttPublish, this))
+@@ -44,7 +46,8 @@ void SolarEdgeClass::init(Scheduler& scheduler)
+     // Modbus polling runs in its own FreeRTOS task (core 0) so that a slow
+     // TCP connection can never block the Hoymiles radio loop.
+     xTaskCreatePinnedToCore(taskEntry, "solaredge", 6144, this, 1, nullptr, 0);
+-    ESP_LOGI(TAG, "SolarEdge reader started (host '%s:%u', unit %u)", _cfg.host.c_str(), _cfg.port, _cfg.unitId);
++    ESP_LOGI(TAG, "SolarEdge reader started (%s, host '%s:%u', unit %u)",
++        _cfg.transport == SE_TRANSPORT_RTU ? "RS485" : "TCP", _cfg.host.c_str(), _cfg.port, _cfg.unitId);
+ }
+ 
+ // ---------------------------------------------------------------- config
+@@ -64,6 +67,9 @@ void SolarEdgeClass::loadConfig()
+     f.close();
+     std::lock_guard<std::mutex> lock(_mutex);
+     _cfg.enabled = doc["enabled"] | true;
++    _cfg.transport = doc["transport"] | (uint8_t)SE_TRANSPORT_TCP;
++    _cfg.baud = doc["baud"] | 115200UL;
++    _cfg.parity = doc["parity"] | 0;
+     _cfg.host = doc["host"] | SOLAREDGE_DEFAULT_HOST;
+     _cfg.port = doc["port"] | SOLAREDGE_DEFAULT_PORT;
+     _cfg.unitId = doc["unit_id"] | SOLAREDGE_DEFAULT_UNIT;
+@@ -77,6 +83,9 @@ bool SolarEdgeClass::saveConfig()
+     {
+         std::lock_guard<std::mutex> lock(_mutex);
+         doc["enabled"] = _cfg.enabled;
++        doc["transport"] = _cfg.transport;
++        doc["baud"] = _cfg.baud;
++        doc["parity"] = _cfg.parity;
+         doc["host"] = _cfg.host;
+         doc["port"] = _cfg.port;
+         doc["unit_id"] = _cfg.unitId;
+@@ -119,6 +128,138 @@ SolarEdgeData SolarEdgeClass::getData()
+ 
+ // ---------------------------------------------------------------- modbus
+ bool SolarEdgeClass::readRegisters(const SolarEdgeConfig& cfg, uint16_t addr, uint16_t count, uint16_t* out)
++{
++    if (cfg.transport == SE_TRANSPORT_RTU) {
++        return readRegistersRtu(cfg, addr, count, out);
++    }
++    return readRegistersTcp(cfg, addr, count, out);
++}
++
++// ---------------------------------------------------------------- RS485 / Modbus RTU
++static uint16_t modbusCrc(const uint8_t* p, size_t n)
++{
++    uint16_t crc = 0xFFFF;
++    while (n--) {
++        crc ^= *p++;
++        for (int i = 0; i < 8; i++) {
++            crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
++        }
++    }
++    return crc;
++}
++
++static inline void rs485Tx(bool tx)
++{
++    // half duplex: DE and /RE switched together
++    digitalWrite(SOLAREDGE_RS485_DE, tx ? HIGH : LOW);
++    digitalWrite(SOLAREDGE_RS485_RE_N, tx ? HIGH : LOW);
++}
++
++void SolarEdgeClass::rs485Begin(const SolarEdgeConfig& cfg)
++{
++    if (_rs485Open && _rs485Baud == cfg.baud && _rs485Parity == cfg.parity) {
++        return;
++    }
++    rs485End();
++    pinMode(SOLAREDGE_RS485_DE, OUTPUT);
++    pinMode(SOLAREDGE_RS485_RE_N, OUTPUT);
++    rs485Tx(false);
++    const uint32_t mode = cfg.parity == 1 ? SERIAL_8E1 : cfg.parity == 2 ? SERIAL_8O1 : SERIAL_8N1;
++    seSerial.setRxBufferSize(512);
++    seSerial.begin(cfg.baud, mode, SOLAREDGE_RS485_RX, SOLAREDGE_RS485_TX);
++    _rs485Open = true;
++    _rs485Baud = cfg.baud;
++    _rs485Parity = cfg.parity;
++    ESP_LOGI(TAG, "RS485 open: %lu baud, parity %u", (unsigned long)cfg.baud, cfg.parity);
++}
++
++void SolarEdgeClass::rs485End()
++{
++    if (_rs485Open) {
++        seSerial.end();
++        _rs485Open = false;
++    }
++}
++
++bool SolarEdgeClass::readRegistersRtu(const SolarEdgeConfig& cfg, uint16_t addr, uint16_t count, uint16_t* out)
++{
++    if (count == 0 || count > 125) {
++        return false;
++    }
++    rs485Begin(cfg);
++    _linkError = "";
++
++    // Modbus RTU needs >= 3.5 char silent time between frames
++    const uint32_t charUs = 11000000UL / (cfg.baud ? cfg.baud : 9600);
++    const uint32_t gapUs = max<uint32_t>(charUs * 4, 1750);
++    delayMicroseconds(gapUs);
++    while (seSerial.available()) {
++        seSerial.read();
++    }
++
++    uint8_t req[8] = {
++        cfg.unitId, 0x03,
++        (uint8_t)(addr >> 8), (uint8_t)addr,
++        (uint8_t)(count >> 8), (uint8_t)count,
++        0, 0
++    };
++    const uint16_t crc = modbusCrc(req, 6);
++    req[6] = crc & 0xFF;
++    req[7] = crc >> 8;
++
++    rs485Tx(true);
++    seSerial.write(req, sizeof(req));
++    seSerial.flush(); // wait until the last stop bit has left the UART
++    rs485Tx(false);
++
++    // response: unit, fc, bytecount, data..., crcLo, crcHi  (exception: unit, fc|0x80, code, crc)
++    uint8_t resp[5 + 250];
++    const size_t want = 5 + count * 2;
++    size_t got = 0;
++    uint32_t start = millis();
++    uint32_t last = start;
++    while (got < want) {
++        const int a = seSerial.available();
++        if (a > 0) {
++            got += seSerial.read(resp + got, want - got);
++            last = millis();
++            if (got >= 5 && (resp[1] & 0x80)) {
++                break; // exception frame is 5 bytes
++            }
++            continue;
++        }
++        const uint32_t now = millis();
++        if (got == 0 && now - start > 1000) {
++            _linkError = "RS485: brak odpowiedzi (adres, predkosc, A/B?)";
++            return false;
++        }
++        if (got > 0 && now - last > 50) {
++            break; // inter-frame timeout
++        }
++        vTaskDelay(pdMS_TO_TICKS(2));
++    }
++
++    if (got >= 5 && resp[0] == cfg.unitId && (resp[1] & 0x80)) {
++        if (modbusCrc(resp, 3) == (uint16_t)(resp[3] | (resp[4] << 8))) {
++            ESP_LOGW(TAG, "Modbus exception %u at register %u", resp[2], addr);
++        }
++        return false;
++    }
++    if (got != want || resp[0] != cfg.unitId || resp[1] != 0x03 || resp[2] != count * 2) {
++        _linkError = "RS485: niepelna lub obca ramka";
++        return false;
++    }
++    if (modbusCrc(resp, want - 2) != (uint16_t)(resp[want - 2] | (resp[want - 1] << 8))) {
++        _linkError = "RS485: blad CRC";
++        return false;
++    }
++    for (uint16_t i = 0; i < count; i++) {
++        out[i] = (resp[3 + i * 2] << 8) | resp[4 + i * 2];
++    }
++    return true;
++}
++
++bool SolarEdgeClass::readRegistersTcp(const SolarEdgeConfig& cfg, uint16_t addr, uint16_t count, uint16_t* out)
+ {
+     if (count == 0 || count > 125) {
+         return false;
+@@ -309,11 +450,15 @@ void SolarEdgeClass::pollLoop()
+         if (_reconnect) {
+             _reconnect = false;
+             seClient.stop();
++            rs485End();
+             std::lock_guard<std::mutex> lock(_mutex);
+             _data = SolarEdgeData();
+         }
+ 
+-        if (cfg.enabled && !cfg.host.isEmpty() && NetworkSettings.isConnected()) {
++        const bool linkOk = cfg.transport == SE_TRANSPORT_RTU
++            ? true
++            : (!cfg.host.isEmpty() && NetworkSettings.isConnected());
++        if (cfg.enabled && linkOk) {
+             SolarEdgeData d = getData();
+             const bool ok = pollOnce(d, cfg);
+             if (ok) {
+@@ -325,6 +470,9 @@ void SolarEdgeClass::pollLoop()
+                 if (millis() - d.lastUpdateMs > cfg.interval * 3000UL) {
+                     d.valid = false;
+                 }
++                if (cfg.transport == SE_TRANSPORT_RTU && !_linkError.isEmpty()) {
++                    d.lastError += " - " + _linkError;
++                }
+                 ESP_LOGW(TAG, "Poll failed: %s", d.lastError.c_str());
+             }
+             std::lock_guard<std::mutex> lock(_mutex);
+diff --git a/src/WebApi_solaredge.cpp b/src/WebApi_solaredge.cpp
+index 8d6b6b3..2331cb1 100644
+--- a/src/WebApi_solaredge.cpp
++++ b/src/WebApi_solaredge.cpp
+@@ -11,6 +11,7 @@
+ #include "WebApi_solaredge.h"
+ #include "Datastore.h"
+ #include "EnergyHistory.h"
++#include "PowerLog.h"
+ #include "HistoryPage.h"
+ #include "SolarEdge.h"
+ #include "WebApi.h"
+@@ -23,6 +24,7 @@ void WebApiSolarEdgeClass::init(AsyncWebServer& server, Scheduler& scheduler)
+     server.on("/api/solaredge/status", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onStatus, this, _1)));
+     server.on("/api/solaredge/config", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onConfigGet, this, _1)));
+     server.on("/history", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onHistoryPage, this, _1)));
++    server.on("/api/history/power", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onPowerGet, this, _1)));
+     server.on("/api/history/reset", HTTP_POST, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onHistoryReset, this, _1)));
+     server.on("/api/history", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onHistoryGet, this, _1)));
+     server.on("/api/solaredge/config", HTTP_POST, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onConfigPost, this, _1)));
+@@ -98,6 +100,9 @@ void WebApiSolarEdgeClass::onConfigGet(AsyncWebServerRequest* request)
+     auto& root = response->getRoot();
+     const SolarEdgeConfig c = SolarEdge.getConfig();
+     root["enabled"] = c.enabled;
++    root["transport"] = c.transport == SE_TRANSPORT_RTU ? "rtu" : "tcp";
++    root["baud"] = c.baud;
++    root["parity"] = c.parity;
+     root["host"] = c.host;
+     root["port"] = c.port;
+     root["unit_id"] = c.unitId;
+@@ -120,13 +125,22 @@ void WebApiSolarEdgeClass::onConfigPost(AsyncWebServerRequest* request)
+ 
+     SolarEdgeConfig c = SolarEdge.getConfig();
+     if (root["enabled"].is<bool>()) c.enabled = root["enabled"].as<bool>();
++    if (root["transport"].is<String>()) c.transport = root["transport"].as<String>() == "rtu" ? SE_TRANSPORT_RTU : SE_TRANSPORT_TCP;
++    if (root["baud"].is<uint32_t>()) c.baud = root["baud"].as<uint32_t>();
++    if (root["parity"].is<uint8_t>()) c.parity = root["parity"].as<uint8_t>();
+     if (root["host"].is<String>()) c.host = root["host"].as<String>();
+     if (root["port"].is<uint16_t>()) c.port = root["port"].as<uint16_t>();
+     if (root["unit_id"].is<uint8_t>()) c.unitId = root["unit_id"].as<uint8_t>();
+     if (root["interval"].is<uint16_t>()) c.interval = root["interval"].as<uint16_t>();
+     if (root["read_meter"].is<bool>()) c.readMeter = root["read_meter"].as<bool>();
+ 
+-    if (c.host.length() > 64 || c.port == 0) {
++    if (c.baud < 1200 || c.baud > 230400 || c.parity > 2 || c.unitId == 0 || c.unitId > 247) {
++        retMsg["message"] = "Invalid RS485 settings!";
++        retMsg["code"] = WebApiError::GenericValueMissing;
++        WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++        return;
++    }
++    if (c.host.length() > 64 || (c.transport == SE_TRANSPORT_TCP && c.port == 0)) {
+         retMsg["message"] = "Invalid host or port!";
+         retMsg["code"] = WebApiError::GenericValueMissing;
+         WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
+@@ -165,6 +179,7 @@ void WebApiSolarEdgeClass::onHistoryReset(AsyncWebServerRequest* request)
+         return;
+     }
+     EnergyHistory.reset();
++    PowerLog.reset();
+     AsyncJsonResponse* response = new AsyncJsonResponse();
+     auto& retMsg = response->getRoot();
+     retMsg["type"] = "success";
+@@ -172,3 +187,15 @@ void WebApiSolarEdgeClass::onHistoryReset(AsyncWebServerRequest* request)
+     retMsg["code"] = WebApiError::GenericSuccess;
+     WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
+ }
++
++// GET /api/history/power?day=0 (today) | 1 (yesterday)
++void WebApiSolarEdgeClass::onPowerGet(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentialsReadonly(request)) {
++        return;
++    }
++    const uint8_t which = request->hasParam("day") && request->getParam("day")->value() == "1" ? 1 : 0;
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    PowerLog.toJson(response->getRoot().as<JsonObject>(), which);
++    WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++}
+diff --git a/src/main.cpp b/src/main.cpp
+index 809c30d..2ed4697 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -8,6 +8,7 @@
+ #include "EnergyHistory.h"
+ #include "HoymilesChannels.h"
+ #include "FusionDisplay.h"
++#include "PowerLog.h"
+ #include "I18n.h"
+ #include "InverterSettings.h"
+ #include "Led_Single.h"
+@@ -140,6 +141,7 @@ void setup()
+     // Persistent daily/monthly/yearly energy history
+     HoymilesChannels.init();
+     EnergyHistory.init(scheduler);
++    PowerLog.init(scheduler);
+ 
+     // microSD CSV logger (needs a free SPI bus -> *_sd firmware variant)
+     SdLogger.init(scheduler);
+-- 
+2.53.0
+

@@ -1,0 +1,864 @@
+From 8c71e0645c55f7048816d8db0fdeb3f890910f92 Mon Sep 17 00:00:00 2001
+From: okty111 <okty111@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 10:20:17 +0000
+Subject: [PATCH 1/7] Add SolarEdge Modbus TCP (SunSpec) reader for OpenDTU
+ Fusion
+
+Co-authored-by: Perplexity <noreply@perplexity.ai>
+---
+ README_FUSION_SOLAREDGE.md | 111 +++++++++++
+ include/SolarEdge.h        |  96 +++++++++
+ include/WebApi.h           |   2 +
+ include/WebApi_solaredge.h |  15 ++
+ src/SolarEdge.cpp          | 398 +++++++++++++++++++++++++++++++++++++
+ src/WebApi.cpp             |   1 +
+ src/WebApi_solaredge.cpp   | 133 +++++++++++++
+ src/main.cpp               |   5 +
+ 8 files changed, 761 insertions(+)
+ create mode 100644 README_FUSION_SOLAREDGE.md
+ create mode 100644 include/SolarEdge.h
+ create mode 100644 include/WebApi_solaredge.h
+ create mode 100644 src/SolarEdge.cpp
+ create mode 100644 src/WebApi_solaredge.cpp
+
+diff --git a/README_FUSION_SOLAREDGE.md b/README_FUSION_SOLAREDGE.md
+new file mode 100644
+index 0000000..9ae0034
+--- /dev/null
++++ b/README_FUSION_SOLAREDGE.md
+@@ -0,0 +1,111 @@
++# OpenDTU Fusion + Hoymiles MIT-5000-8T + SolarEdge
++
++Firmware dla płytki **OpenDTU Fusion v2** (ESP32-S3, NRF24 + CMT2300A), która jednocześnie:
++
++1. odczytuje mikroinwerter **Hoymiles MIT-5000-8T** radiowo (Sub-1G, 868 MHz, CMT2300A),
++2. odczytuje falownik **SolarEdge** po sieci przez **Modbus TCP (SunSpec)**,
++3. publikuje dane obu falowników (oraz sumę) przez **MQTT** i **REST API**.
++
++Bazą jest OpenDTU z gałęzi `smoe/OpenDTU:supporting_5000_MIT_8T` (PR #3161 w tbnobody/OpenDTU,
++rebase PR #2962 dodającego obsługę MIT-5000-8T). Stabilne OpenDTU **nie** obsługuje jeszcze MIT.
++
++## Nowe pliki
++
++| Plik | Opis |
++|---|---|
++| `include/SolarEdge.h`, `src/SolarEdge.cpp` | Klient Modbus TCP, dekodowanie SunSpec (model 101/103 + licznik 201-204), publikacja MQTT |
++| `include/WebApi_solaredge.h`, `src/WebApi_solaredge.cpp` | Endpointy REST |
++| `src/main.cpp`, `src/WebApi.cpp`, `include/WebApi.h` | Wpięcie modułu (kilka linii) |
++
++Odczyt SolarEdge działa w osobnym zadaniu FreeRTOS (rdzeń 0), więc zawieszone połączenie TCP
++nie blokuje komunikacji radiowej z Hoymiles.
++
++## 1. Przygotowanie SolarEdge
++
++Modbus TCP musi być włączony w falowniku (aplikacja **SetApp**):
++`Commissioning → Site Communication → Modbus TCP → Enable`.
++Domyślny port to **1502** (czasem 502), Device ID = **1**.
++Uwaga: SolarEdge akceptuje **tylko jedno** połączenie Modbus TCP naraz — wyłącz inne
++klienty (np. integrację Home Assistant), inaczej odczyt będzie się rozłączał.
++Najlepiej nadaj falownikowi stały adres IP w routerze.
++
++## 2. Kompilacja i wgranie
++
++```bash
++pip install platformio
++pio run -e opendtufusionv2 -t upload          # Fusion v2 (Wi-Fi)
++# lub: pio run -e opendtufusionv2_poe -t upload   (Fusion v2 + PoE/W5500)
++```
++
++Opcjonalnie domyślne ustawienia SolarEdge można wkompilować w `platformio_override.ini`:
++
++```ini
++[env:opendtufusionv2]
++build_flags = ${env:opendtufusionv2.build_flags}
++    -DSOLAREDGE_DEFAULT_HOST=\"192.168.1.50\"
++    -DSOLAREDGE_DEFAULT_PORT=1502
++    -DSOLAREDGE_DEFAULT_UNIT=1
++    -DSOLAREDGE_DEFAULT_INTERVAL=10
++    -DSOLAREDGE_DEFAULT_METER=true
++```
++
++## 3. Konfiguracja Hoymiles (UI OpenDTU)
++
++1. Połącz się z AP `OpenDTU-xxxx` (hasło `openDTU42`), skonfiguruj Wi-Fi.
++2. **Settings → Device Manager**: wybierz profil pinów *OpenDTU Fusion v2*.
++3. **Settings → DTU**: ustaw częstotliwość CMT na 865–868 MHz (EU).
++4. **Settings → Inverter**: dodaj MIT-5000-8T po numerze seryjnym z naklejki.
++5. Ten sam inwerter nie może być jednocześnie odpytywany przez oryginalną DTU Hoymiles.
++
++## 4. Konfiguracja SolarEdge (REST)
++
++```bash
++# ustawienie (zapisywane w /solaredge.json na LittleFS, działa od razu)
++curl -u admin:openDTU42 -X POST http://opendtu.local/api/solaredge/config \
++  --data-urlencode 'data={"host":"192.168.1.50","port":1502,"unit_id":1,"interval":10,"read_meter":true}'
++
++# odczyt
++curl -u admin:openDTU42 http://opendtu.local/api/solaredge/status
++```
++
++Przykładowa odpowiedź `/api/solaredge/status`:
++
++```json
++{
++  "valid": true, "model": "SE10K-RW0TEBEN4", "status": 4, "status_text": "Producing (MPPT)",
++  "ac": { "power": 6234.0, "voltage_l1": 231.2, "frequency": 50.01, "yield_total_kwh": 18234.5 },
++  "dc": { "power": 6410.0, "voltage": 750.3, "current": 8.54 },
++  "meter": { "power": -1520.0, "exported_kwh": 9120.1, "imported_kwh": 3110.7 },
++  "fusion": { "power_hoymiles": 3820.5, "power_solaredge": 6234.0, "power_total": 10054.5 }
++}
++```
++
++## 5. Tematy MQTT
++
++Prefiks jak w ustawieniach MQTT OpenDTU (domyślnie `solar/`). Hoymiles publikuje standardowo
++(`solar/<serial>/...`, `solar/ac/power` itd.), dodatkowo:
++
++| Temat | Jednostka |
++|---|---|
++| `solar/solaredge/ac/power` | W |
++| `solar/solaredge/ac/voltage_l1..l3`, `ac/current`, `ac/frequency`, `ac/power_factor` | V / A / Hz / – |
++| `solar/solaredge/ac/yieldtotal` | kWh |
++| `solar/solaredge/dc/power`, `dc/voltage`, `dc/current` | W / V / A |
++| `solar/solaredge/temperature` | °C |
++| `solar/solaredge/status`, `status_text`, `is_valid` | – |
++| `solar/solaredge/meter/power` (+ eksport, − import), `meter/exported`, `meter/imported` | W / kWh |
++| `solar/fusion/ac/power` | W — suma Hoymiles + SolarEdge |
++| `solar/fusion/ac/power_hoymiles`, `fusion/ac/power_solaredge` | W |
++| `solar/fusion/ac/yieldtotal` | kWh — suma |
++
++## Rejestry SunSpec (adresy 0-based)
++
++| Adres | Dane |
++|---|---|
++| 40000–40068 | blok Common (SunS, producent, model, wersja, numer seryjny) |
++| 40069–40108 | falownik: prądy/napięcia AC, moc 40083, częstotliwość 40085, energia 40093-94, DC 40096-40101, temperatura 40103, status 40107 |
++| 40188–40242 | licznik 1: moc 40206-40210, eksport 40226, import 40234, SF energii 40242 |
++
++## Licencja
++
++GPL-2.0-or-later (jak OpenDTU).
+diff --git a/include/SolarEdge.h b/include/SolarEdge.h
+new file mode 100644
+index 0000000..eca5719
+--- /dev/null
++++ b/include/SolarEdge.h
+@@ -0,0 +1,96 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * SolarEdge SunSpec Modbus-TCP reader for OpenDTU (Fusion)
++ */
++#pragma once
++
++#include <Arduino.h>
++#include <TaskSchedulerDeclarations.h>
++#include <mutex>
++
++#ifndef SOLAREDGE_DEFAULT_HOST
++#define SOLAREDGE_DEFAULT_HOST ""          // e.g. "192.168.1.50"
++#endif
++#ifndef SOLAREDGE_DEFAULT_PORT
++#define SOLAREDGE_DEFAULT_PORT 1502        // SolarEdge default (SetApp), sometimes 502
++#endif
++#ifndef SOLAREDGE_DEFAULT_UNIT
++#define SOLAREDGE_DEFAULT_UNIT 1
++#endif
++#ifndef SOLAREDGE_DEFAULT_INTERVAL
++#define SOLAREDGE_DEFAULT_INTERVAL 10      // seconds
++#endif
++#ifndef SOLAREDGE_DEFAULT_METER
++#define SOLAREDGE_DEFAULT_METER false      // read Meter 1 (SE energy meter)
++#endif
++
++struct SolarEdgeConfig {
++    String host = SOLAREDGE_DEFAULT_HOST;
++    uint16_t port = SOLAREDGE_DEFAULT_PORT;
++    uint8_t unitId = SOLAREDGE_DEFAULT_UNIT;
++    uint16_t interval = SOLAREDGE_DEFAULT_INTERVAL;
++    bool readMeter = SOLAREDGE_DEFAULT_METER;
++    bool enabled = true;
++};
++
++struct SolarEdgeData {
++    bool valid = false;
++    uint32_t lastUpdateMs = 0;
++    uint32_t errors = 0;
++    String lastError;
++
++    // common block
++    String manufacturer, model, version, serial;
++
++    // inverter (model 101/102/103)
++    uint16_t sunspecDid = 0;
++    float acCurrent = 0, acCurrentA = 0, acCurrentB = 0, acCurrentC = 0;
++    float acVoltageAN = 0, acVoltageBN = 0, acVoltageCN = 0;
++    float acPower = 0;       // W
++    float acFrequency = 0;   // Hz
++    float acVA = 0, acVAR = 0, acPF = 0;
++    float energyTotal = 0;   // Wh lifetime
++    float dcCurrent = 0, dcVoltage = 0, dcPower = 0;
++    float heatsinkTemp = 0;  // °C
++    uint16_t status = 0;
++    uint16_t vendorStatus = 0;
++
++    // meter 1 (optional)
++    bool meterValid = false;
++    float meterPower = 0;    // W, SolarEdge: + = export to grid, - = import
++    float meterPowerA = 0, meterPowerB = 0, meterPowerC = 0;
++    float meterExported = 0; // Wh
++    float meterImported = 0; // Wh
++};
++
++class SolarEdgeClass {
++public:
++    SolarEdgeClass();
++    void init(Scheduler& scheduler);
++
++    SolarEdgeData getData();
++    SolarEdgeConfig getConfig();
++    bool setConfig(const SolarEdgeConfig& cfg);
++
++    static const char* statusToString(uint16_t status);
++
++private:
++    static void taskEntry(void* arg);
++    void pollLoop();
++    bool pollOnce(SolarEdgeData& d, const SolarEdgeConfig& cfg);
++    bool readRegisters(const SolarEdgeConfig& cfg, uint16_t addr, uint16_t count, uint16_t* out);
++
++    void loadConfig();
++    bool saveConfig();
++    void mqttPublish();
++
++    std::mutex _mutex;
++    SolarEdgeConfig _cfg;
++    SolarEdgeData _data;
++    uint16_t _transactionId = 0;
++    volatile bool _reconnect = false;
++
++    Task _mqttTask;
++};
++
++extern SolarEdgeClass SolarEdge;
+diff --git a/include/WebApi.h b/include/WebApi.h
+index f4ceaff..74f7408 100644
+--- a/include/WebApi.h
++++ b/include/WebApi.h
+@@ -20,6 +20,7 @@
+ #include "WebApi_power.h"
+ #include "WebApi_prometheus.h"
+ #include "WebApi_security.h"
++#include "WebApi_solaredge.h"
+ #include "WebApi_sysstatus.h"
+ #include "WebApi_webapp.h"
+ #include "WebApi_ws_console.h"
+@@ -68,6 +69,7 @@ private:
+     WebApiPowerClass _webApiPower;
+     WebApiPrometheusClass _webApiPrometheus;
+     WebApiSecurityClass _webApiSecurity;
++    WebApiSolarEdgeClass _webApiSolarEdge;
+     WebApiSysstatusClass _webApiSysstatus;
+     WebApiWebappClass _webApiWebapp;
+     WebApiWsConsoleClass _webApiWsConsole;
+diff --git a/include/WebApi_solaredge.h b/include/WebApi_solaredge.h
+new file mode 100644
+index 0000000..7ad3036
+--- /dev/null
++++ b/include/WebApi_solaredge.h
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <ESPAsyncWebServer.h>
++#include <TaskSchedulerDeclarations.h>
++
++class WebApiSolarEdgeClass {
++public:
++    void init(AsyncWebServer& server, Scheduler& scheduler);
++
++private:
++    void onStatus(AsyncWebServerRequest* request);
++    void onConfigGet(AsyncWebServerRequest* request);
++    void onConfigPost(AsyncWebServerRequest* request);
++};
+diff --git a/src/SolarEdge.cpp b/src/SolarEdge.cpp
+new file mode 100644
+index 0000000..5071b21
+--- /dev/null
++++ b/src/SolarEdge.cpp
+@@ -0,0 +1,398 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * SolarEdge SunSpec Modbus-TCP reader for OpenDTU (Fusion)
++ *
++ * Register map (0-based Modbus addresses, SolarEdge "SunSpec Implementation
++ * Technical Note"):  common block 40000, inverter model 40069, meter 1 at 40121/40188.
++ */
++#include "SolarEdge.h"
++#include "Configuration.h"
++#include "Datastore.h"
++#include "MqttSettings.h"
++#include "NetworkSettings.h"
++#include <ArduinoJson.h>
++#include <LittleFS.h>
++#if __has_include(<NetworkClient.h>)
++#include <NetworkClient.h> // Arduino-ESP32 3.x (WiFi + Ethernet)
++#else
++#include <WiFiClient.h> // Arduino-ESP32 2.x (lwIP sockets, also works over W5500)
++using NetworkClient = WiFiClient;
++#endif
++#include <cmath>
++
++#undef TAG
++static const char* TAG = "solaredge";
++
++#define SOLAREDGE_CFG_FILE "/solaredge.json"
++
++SolarEdgeClass SolarEdge;
++
++static NetworkClient seClient;
++
++SolarEdgeClass::SolarEdgeClass()
++    : _mqttTask(TASK_SECOND * 10, TASK_FOREVER, std::bind(&SolarEdgeClass::mqttPublish, this))
++{
++}
++
++void SolarEdgeClass::init(Scheduler& scheduler)
++{
++    loadConfig();
++
++    scheduler.addTask(_mqttTask);
++    _mqttTask.enable();
++
++    // Modbus polling runs in its own FreeRTOS task (core 0) so that a slow
++    // TCP connection can never block the Hoymiles radio loop.
++    xTaskCreatePinnedToCore(taskEntry, "solaredge", 6144, this, 1, nullptr, 0);
++    ESP_LOGI(TAG, "SolarEdge reader started (host '%s:%u', unit %u)", _cfg.host.c_str(), _cfg.port, _cfg.unitId);
++}
++
++// ---------------------------------------------------------------- config
++void SolarEdgeClass::loadConfig()
++{
++    File f = LittleFS.open(SOLAREDGE_CFG_FILE, "r", false);
++    if (!f) {
++        ESP_LOGI(TAG, "No %s, using build defaults", SOLAREDGE_CFG_FILE);
++        return;
++    }
++    JsonDocument doc;
++    if (deserializeJson(doc, f)) {
++        ESP_LOGW(TAG, "Invalid %s", SOLAREDGE_CFG_FILE);
++        f.close();
++        return;
++    }
++    f.close();
++    std::lock_guard<std::mutex> lock(_mutex);
++    _cfg.enabled = doc["enabled"] | true;
++    _cfg.host = doc["host"] | SOLAREDGE_DEFAULT_HOST;
++    _cfg.port = doc["port"] | SOLAREDGE_DEFAULT_PORT;
++    _cfg.unitId = doc["unit_id"] | SOLAREDGE_DEFAULT_UNIT;
++    _cfg.interval = doc["interval"] | SOLAREDGE_DEFAULT_INTERVAL;
++    _cfg.readMeter = doc["read_meter"] | SOLAREDGE_DEFAULT_METER;
++}
++
++bool SolarEdgeClass::saveConfig()
++{
++    JsonDocument doc;
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        doc["enabled"] = _cfg.enabled;
++        doc["host"] = _cfg.host;
++        doc["port"] = _cfg.port;
++        doc["unit_id"] = _cfg.unitId;
++        doc["interval"] = _cfg.interval;
++        doc["read_meter"] = _cfg.readMeter;
++    }
++    File f = LittleFS.open(SOLAREDGE_CFG_FILE, "w");
++    if (!f) {
++        return false;
++    }
++    const bool ok = serializeJson(doc, f) > 0;
++    f.close();
++    return ok;
++}
++
++SolarEdgeConfig SolarEdgeClass::getConfig()
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    return _cfg;
++}
++
++bool SolarEdgeClass::setConfig(const SolarEdgeConfig& cfg)
++{
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        _cfg = cfg;
++        if (_cfg.interval < 2) {
++            _cfg.interval = 2;
++        }
++    }
++    _reconnect = true;
++    return saveConfig();
++}
++
++SolarEdgeData SolarEdgeClass::getData()
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    return _data;
++}
++
++// ---------------------------------------------------------------- modbus
++bool SolarEdgeClass::readRegisters(const SolarEdgeConfig& cfg, uint16_t addr, uint16_t count, uint16_t* out)
++{
++    if (count == 0 || count > 125) {
++        return false;
++    }
++
++    if (!seClient.connected()) {
++        seClient.stop();
++        seClient.setTimeout(3000);
++        if (!seClient.connect(cfg.host.c_str(), cfg.port, 3000)) {
++            return false;
++        }
++        seClient.setNoDelay(true);
++    }
++
++    while (seClient.available()) { // drop stale bytes
++        seClient.read();
++    }
++
++    const uint16_t tid = ++_transactionId;
++    uint8_t req[12] = {
++        (uint8_t)(tid >> 8), (uint8_t)tid, // transaction id
++        0, 0, // protocol id
++        0, 6, // length
++        cfg.unitId,
++        0x03, // read holding registers
++        (uint8_t)(addr >> 8), (uint8_t)addr,
++        (uint8_t)(count >> 8), (uint8_t)count
++    };
++    if (seClient.write(req, sizeof(req)) != sizeof(req)) {
++        seClient.stop();
++        return false;
++    }
++
++    auto readExact = [](uint8_t* buf, size_t len, uint32_t timeoutMs) -> bool {
++        size_t got = 0;
++        const uint32_t start = millis();
++        while (got < len) {
++            if (millis() - start > timeoutMs) {
++                return false;
++            }
++            const int avail = seClient.available();
++            if (avail > 0) {
++                got += seClient.read(buf + got, len - got);
++            } else {
++                if (!seClient.connected()) {
++                    return false;
++                }
++                vTaskDelay(pdMS_TO_TICKS(5));
++            }
++        }
++        return true;
++    };
++
++    uint8_t hdr[9];
++    if (!readExact(hdr, sizeof(hdr), 3000)) {
++        seClient.stop();
++        return false;
++    }
++    const uint16_t rtid = (hdr[0] << 8) | hdr[1];
++    if (rtid != tid) {
++        seClient.stop();
++        return false;
++    }
++    if (hdr[7] & 0x80) { // modbus exception, hdr[8] = exception code
++        ESP_LOGW(TAG, "Modbus exception %u at register %u", hdr[8], addr);
++        return false;
++    }
++    const uint8_t byteCount = hdr[8];
++    if (byteCount != count * 2) {
++        seClient.stop();
++        return false;
++    }
++    uint8_t data[250];
++    if (!readExact(data, byteCount, 3000)) {
++        seClient.stop();
++        return false;
++    }
++    for (uint16_t i = 0; i < count; i++) {
++        out[i] = (data[i * 2] << 8) | data[i * 2 + 1];
++    }
++    return true;
++}
++
++static inline float scaled(uint16_t raw, uint16_t sf, bool isSigned = true)
++{
++    const int16_t s = static_cast<int16_t>(sf);
++    if (s == -32768) { // "not implemented"
++        return NAN;
++    }
++    const float v = isSigned ? static_cast<int16_t>(raw) : raw;
++    return v * powf(10.0f, s);
++}
++
++static String regsToString(const uint16_t* r, size_t n)
++{
++    String s;
++    for (size_t i = 0; i < n; i++) {
++        const char a = r[i] >> 8, b = r[i] & 0xFF;
++        if (a) s += a;
++        if (b) s += b;
++    }
++    s.trim();
++    return s;
++}
++
++bool SolarEdgeClass::pollOnce(SolarEdgeData& d, const SolarEdgeConfig& cfg)
++{
++    uint16_t r[125];
++
++    // Common block (once): 40000.. SunS id, manufacturer, model, version, serial
++    if (d.serial.isEmpty()) {
++        if (!readRegisters(cfg, 40000, 69, r)) {
++            d.lastError = "common block read failed";
++            return false;
++        }
++        if (r[0] != 0x5375 || r[1] != 0x6e53) { // "SunS"
++            d.lastError = "no SunSpec signature";
++            return false;
++        }
++        d.manufacturer = regsToString(&r[4], 16);
++        d.model = regsToString(&r[20], 16);
++        d.version = regsToString(&r[44], 8);
++        d.serial = regsToString(&r[52], 16);
++    }
++
++    // Inverter model: 40069 .. 40108 (40 registers)
++    if (!readRegisters(cfg, 40069, 40, r)) {
++        d.lastError = "inverter block read failed";
++        return false;
++    }
++    auto R = [&](uint16_t a) { return r[a - 40069]; };
++    d.sunspecDid = R(40069);
++    const uint16_t sfI = R(40075);
++    d.acCurrent = scaled(R(40071), sfI, false);
++    d.acCurrentA = scaled(R(40072), sfI, false);
++    d.acCurrentB = scaled(R(40073), sfI, false);
++    d.acCurrentC = scaled(R(40074), sfI, false);
++    const uint16_t sfV = R(40082);
++    d.acVoltageAN = scaled(R(40079), sfV, false);
++    d.acVoltageBN = scaled(R(40080), sfV, false);
++    d.acVoltageCN = scaled(R(40081), sfV, false);
++    d.acPower = scaled(R(40083), R(40084));
++    d.acFrequency = scaled(R(40085), R(40086), false);
++    d.acVA = scaled(R(40087), R(40088));
++    d.acVAR = scaled(R(40089), R(40090));
++    d.acPF = scaled(R(40091), R(40092));
++    const uint32_t wh = (static_cast<uint32_t>(R(40093)) << 16) | R(40094);
++    d.energyTotal = wh * powf(10.0f, static_cast<int16_t>(R(40095)));
++    d.dcCurrent = scaled(R(40096), R(40097), false);
++    d.dcVoltage = scaled(R(40098), R(40099), false);
++    d.dcPower = scaled(R(40100), R(40101));
++    d.heatsinkTemp = scaled(R(40103), R(40106));
++    d.status = R(40107);
++    d.vendorStatus = R(40108);
++
++    // Meter 1: model 201-204 at 40188 .. 40242 (55 registers)
++    d.meterValid = false;
++    if (cfg.readMeter && readRegisters(cfg, 40188, 55, r)) {
++        auto M = [&](uint16_t a) { return r[a - 40188]; };
++        const uint16_t did = M(40188);
++        if (did >= 201 && did <= 204) {
++            const uint16_t sfW = M(40210);
++            d.meterPower = scaled(M(40206), sfW);
++            d.meterPowerA = scaled(M(40207), sfW);
++            d.meterPowerB = scaled(M(40208), sfW);
++            d.meterPowerC = scaled(M(40209), sfW);
++            const float sfE = powf(10.0f, static_cast<int16_t>(M(40242)));
++            d.meterExported = ((static_cast<uint32_t>(M(40226)) << 16) | M(40227)) * sfE;
++            d.meterImported = ((static_cast<uint32_t>(M(40234)) << 16) | M(40235)) * sfE;
++            d.meterValid = true;
++        }
++    }
++
++    d.lastError = "";
++    return true;
++}
++
++void SolarEdgeClass::taskEntry(void* arg)
++{
++    static_cast<SolarEdgeClass*>(arg)->pollLoop();
++}
++
++void SolarEdgeClass::pollLoop()
++{
++    for (;;) {
++        const SolarEdgeConfig cfg = getConfig();
++
++        if (_reconnect) {
++            _reconnect = false;
++            seClient.stop();
++            std::lock_guard<std::mutex> lock(_mutex);
++            _data = SolarEdgeData();
++        }
++
++        if (cfg.enabled && !cfg.host.isEmpty() && NetworkSettings.isConnected()) {
++            SolarEdgeData d = getData();
++            const bool ok = pollOnce(d, cfg);
++            if (ok) {
++                d.valid = true;
++                d.lastUpdateMs = millis();
++            } else {
++                d.errors++;
++                // mark data stale after 3 intervals without success
++                if (millis() - d.lastUpdateMs > cfg.interval * 3000UL) {
++                    d.valid = false;
++                }
++                ESP_LOGW(TAG, "Poll failed: %s", d.lastError.c_str());
++            }
++            std::lock_guard<std::mutex> lock(_mutex);
++            _data = d;
++        }
++
++        vTaskDelay(pdMS_TO_TICKS(cfg.interval * 1000UL));
++    }
++}
++
++// ---------------------------------------------------------------- mqtt
++void SolarEdgeClass::mqttPublish()
++{
++    _mqttTask.setInterval(Configuration.get().Mqtt.PublishInterval * TASK_SECOND);
++
++    if (!MqttSettings.getConnected()) {
++        return;
++    }
++    const SolarEdgeData d = getData();
++
++    MqttSettings.publish("solaredge/is_valid", String(d.valid));
++    if (d.valid) {
++        MqttSettings.publish("solaredge/serial", d.serial);
++        MqttSettings.publish("solaredge/model", d.model);
++        MqttSettings.publish("solaredge/status", String(d.status));
++        MqttSettings.publish("solaredge/status_text", statusToString(d.status));
++        MqttSettings.publish("solaredge/ac/power", String(d.acPower, 1));
++        MqttSettings.publish("solaredge/ac/current", String(d.acCurrent, 2));
++        MqttSettings.publish("solaredge/ac/voltage_l1", String(d.acVoltageAN, 1));
++        MqttSettings.publish("solaredge/ac/voltage_l2", String(d.acVoltageBN, 1));
++        MqttSettings.publish("solaredge/ac/voltage_l3", String(d.acVoltageCN, 1));
++        MqttSettings.publish("solaredge/ac/frequency", String(d.acFrequency, 2));
++        MqttSettings.publish("solaredge/ac/power_factor", String(d.acPF, 2));
++        MqttSettings.publish("solaredge/ac/yieldtotal", String(d.energyTotal / 1000.0f, 3)); // kWh
++        MqttSettings.publish("solaredge/dc/power", String(d.dcPower, 1));
++        MqttSettings.publish("solaredge/dc/voltage", String(d.dcVoltage, 1));
++        MqttSettings.publish("solaredge/dc/current", String(d.dcCurrent, 2));
++        MqttSettings.publish("solaredge/temperature", String(d.heatsinkTemp, 1));
++        if (d.meterValid) {
++            MqttSettings.publish("solaredge/meter/power", String(d.meterPower, 1));
++            MqttSettings.publish("solaredge/meter/exported", String(d.meterExported / 1000.0f, 3));
++            MqttSettings.publish("solaredge/meter/imported", String(d.meterImported / 1000.0f, 3));
++        }
++    }
++
++    // Combined production Hoymiles (all enabled inverters) + SolarEdge
++    const float hoyPower = Datastore.getTotalAcPowerEnabled();
++    const float hoyYield = Datastore.getTotalAcYieldTotalEnabled(); // kWh
++    const float sePower = d.valid ? d.acPower : 0.0f;
++    MqttSettings.publish("fusion/ac/power", String(hoyPower + sePower, 1));
++    MqttSettings.publish("fusion/ac/power_hoymiles", String(hoyPower, 1));
++    MqttSettings.publish("fusion/ac/power_solaredge", String(sePower, 1));
++    if (d.valid) {
++        MqttSettings.publish("fusion/ac/yieldtotal", String(hoyYield + d.energyTotal / 1000.0f, 3));
++    }
++}
++
++const char* SolarEdgeClass::statusToString(uint16_t status)
++{
++    switch (status) {
++    case 1: return "Off";
++    case 2: return "Sleeping";
++    case 3: return "Starting";
++    case 4: return "Producing (MPPT)";
++    case 5: return "Throttled";
++    case 6: return "Shutting down";
++    case 7: return "Fault";
++    case 8: return "Standby";
++    default: return "Unknown";
++    }
++}
+diff --git a/src/WebApi.cpp b/src/WebApi.cpp
+index 8d506f9..d359493 100644
+--- a/src/WebApi.cpp
++++ b/src/WebApi.cpp
+@@ -35,6 +35,7 @@ void WebApiClass::init(Scheduler& scheduler)
+     _webApiPower.init(_server, scheduler);
+     _webApiPrometheus.init(_server, scheduler);
+     _webApiSecurity.init(_server, scheduler);
++    _webApiSolarEdge.init(_server, scheduler);
+     _webApiSysstatus.init(_server, scheduler);
+     _webApiWebapp.init(_server, scheduler);
+     _webApiWsConsole.init(_server, scheduler);
+diff --git a/src/WebApi_solaredge.cpp b/src/WebApi_solaredge.cpp
+new file mode 100644
+index 0000000..c2a5ddf
+--- /dev/null
++++ b/src/WebApi_solaredge.cpp
+@@ -0,0 +1,133 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * REST API for the SolarEdge Modbus-TCP reader
++ *   GET  /api/solaredge/status   live values
++ *   GET  /api/solaredge/config   current settings
++ *   POST /api/solaredge/config   data={"host":"192.168.1.50","port":1502,...}
++ */
++#include "WebApi_solaredge.h"
++#include "Datastore.h"
++#include "SolarEdge.h"
++#include "WebApi.h"
++#include "WebApi_errors.h"
++#include <AsyncJson.h>
++
++void WebApiSolarEdgeClass::init(AsyncWebServer& server, Scheduler& scheduler)
++{
++    using std::placeholders::_1;
++    server.on("/api/solaredge/status", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onStatus, this, _1)));
++    server.on("/api/solaredge/config", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onConfigGet, this, _1)));
++    server.on("/api/solaredge/config", HTTP_POST, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onConfigPost, this, _1)));
++}
++
++void WebApiSolarEdgeClass::onStatus(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentialsReadonly(request)) {
++        return;
++    }
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    auto& root = response->getRoot();
++    const SolarEdgeData d = SolarEdge.getData();
++
++    root["valid"] = d.valid;
++    root["age_ms"] = d.lastUpdateMs ? millis() - d.lastUpdateMs : 0;
++    root["errors"] = d.errors;
++    root["last_error"] = d.lastError;
++    root["manufacturer"] = d.manufacturer;
++    root["model"] = d.model;
++    root["version"] = d.version;
++    root["serial"] = d.serial;
++    root["sunspec_did"] = d.sunspecDid;
++    root["status"] = d.status;
++    root["status_text"] = SolarEdgeClass::statusToString(d.status);
++
++    auto ac = root["ac"].to<JsonObject>();
++    ac["power"] = d.acPower;
++    ac["current"] = d.acCurrent;
++    ac["current_l1"] = d.acCurrentA;
++    ac["current_l2"] = d.acCurrentB;
++    ac["current_l3"] = d.acCurrentC;
++    ac["voltage_l1"] = d.acVoltageAN;
++    ac["voltage_l2"] = d.acVoltageBN;
++    ac["voltage_l3"] = d.acVoltageCN;
++    ac["frequency"] = d.acFrequency;
++    ac["apparent_power"] = d.acVA;
++    ac["reactive_power"] = d.acVAR;
++    ac["power_factor"] = d.acPF;
++    ac["yield_total_kwh"] = d.energyTotal / 1000.0f;
++
++    auto dc = root["dc"].to<JsonObject>();
++    dc["power"] = d.dcPower;
++    dc["voltage"] = d.dcVoltage;
++    dc["current"] = d.dcCurrent;
++    root["temperature"] = d.heatsinkTemp;
++
++    if (d.meterValid) {
++        auto m = root["meter"].to<JsonObject>();
++        m["power"] = d.meterPower;
++        m["power_l1"] = d.meterPowerA;
++        m["power_l2"] = d.meterPowerB;
++        m["power_l3"] = d.meterPowerC;
++        m["exported_kwh"] = d.meterExported / 1000.0f;
++        m["imported_kwh"] = d.meterImported / 1000.0f;
++    }
++
++    auto total = root["fusion"].to<JsonObject>();
++    const float hoy = Datastore.getTotalAcPowerEnabled();
++    total["power_hoymiles"] = hoy;
++    total["power_solaredge"] = d.valid ? d.acPower : 0.0f;
++    total["power_total"] = hoy + (d.valid ? d.acPower : 0.0f);
++
++    WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++}
++
++void WebApiSolarEdgeClass::onConfigGet(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentials(request)) {
++        return;
++    }
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    auto& root = response->getRoot();
++    const SolarEdgeConfig c = SolarEdge.getConfig();
++    root["enabled"] = c.enabled;
++    root["host"] = c.host;
++    root["port"] = c.port;
++    root["unit_id"] = c.unitId;
++    root["interval"] = c.interval;
++    root["read_meter"] = c.readMeter;
++    WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++}
++
++void WebApiSolarEdgeClass::onConfigPost(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentials(request)) {
++        return;
++    }
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    JsonDocument root;
++    if (!WebApi.parseRequestData(request, response, root)) {
++        return;
++    }
++    auto& retMsg = response->getRoot();
++
++    SolarEdgeConfig c = SolarEdge.getConfig();
++    if (root["enabled"].is<bool>()) c.enabled = root["enabled"].as<bool>();
++    if (root["host"].is<String>()) c.host = root["host"].as<String>();
++    if (root["port"].is<uint16_t>()) c.port = root["port"].as<uint16_t>();
++    if (root["unit_id"].is<uint8_t>()) c.unitId = root["unit_id"].as<uint8_t>();
++    if (root["interval"].is<uint16_t>()) c.interval = root["interval"].as<uint16_t>();
++    if (root["read_meter"].is<bool>()) c.readMeter = root["read_meter"].as<bool>();
++
++    if (c.host.length() > 64 || c.port == 0) {
++        retMsg["message"] = "Invalid host or port!";
++        retMsg["code"] = WebApiError::GenericValueMissing;
++        WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++        return;
++    }
++
++    const bool ok = SolarEdge.setConfig(c);
++    retMsg["type"] = ok ? "success" : "warning";
++    retMsg["message"] = ok ? "Settings saved!" : "Failed to save settings!";
++    retMsg["code"] = ok ? WebApiError::GenericSuccess : WebApiError::GenericWriteFailed;
++    WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++}
+diff --git a/src/main.cpp b/src/main.cpp
+index be04ff2..0c99459 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -19,6 +19,7 @@
+ #include "NtpSettings.h"
+ #include "PinMapping.h"
+ #include "RestartHelper.h"
++#include "SolarEdge.h"
+ #include "Scheduler.h"
+ #include "SunPosition.h"
+ #include "Utils.h"
+@@ -128,6 +129,10 @@ void setup()
+     Datastore.init(scheduler);
+     RestartHelper.init(scheduler);
+ 
++    // SolarEdge inverter via Modbus TCP (SunSpec)
++    ESP_LOGI(TAG, "Initializing SolarEdge...");
++    SolarEdge.init(scheduler);
++
+     ESP_LOGI(TAG, "Startup complete");
+ }
+ 
+-- 
+2.53.0
+

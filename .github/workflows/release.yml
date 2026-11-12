@@ -1,0 +1,55 @@
+# Builds Fusion firmware for every tag fusion-vN and publishes a GitHub release.
+# New version:  git tag fusion-v3 && git push origin fusion-v3
+name: Wydanie Fusion
+on:
+  push:
+    tags: ['fusion-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Numer wersji (np. 3)'
+        required: true
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wersja
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#fusion-v}"; fi
+          echo "V=$V" >> $GITHUB_ENV; echo "TAG=fusion-v$V" >> $GITHUB_ENV
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('BASE_COMMIT') }}
+      - name: OpenDTU + łatki Fusion
+        run: |
+          git clone https://github.com/smoe/OpenDTU.git odtu
+          cd odtu && git checkout "$(cat ../BASE_COMMIT)"
+          git -c user.name=ci -c user.email=ci@localhost am ../patches/*.patch
+      - name: Kompilacja
+        run: |
+          pip install -U platformio
+          cd odtu
+          PLATFORMIO_BUILD_FLAGS="-DFUSION_VERSION=$V" pio run -e opendtufusionv2 -e opendtufusionv2_poe
+      - name: Pliki wydania
+        run: |
+          mkdir out
+          for e in opendtufusionv2 opendtufusionv2_poe; do
+            cp odtu/.pio/build/$e/firmware.bin out/fusion-$e.bin
+            cp odtu/.pio/build/$e/firmware.factory.bin out/fusion-$e.factory.bin
+          done
+          (cd out && sha256sum *.bin > SHA256SUMS.txt)
+          cat out/SHA256SUMS.txt
+      - name: Wydanie
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* --title "Fusion v$V" --notes-file <(git tag -l --format='%(contents)' "$TAG"; echo; echo "Pliki: fusion-opendtufusionv2.bin (Wi-Fi), fusion-opendtufusionv2_poe.bin (PoE), *.factory.bin do pierwszego wgrania pod 0x0.") --latest
+          fi

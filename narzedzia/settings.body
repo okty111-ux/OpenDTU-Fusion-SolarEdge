@@ -1,0 +1,176 @@
+<main>
+
+<section>
+  <h3>Hoymiles · radio 868 MHz (CMT2300A)</h3>
+  <p class="sub">MIT-5000-8T, HMS i HMT komunikują się radiowo. Wartości dla Polski: 865–868 MHz.</p>
+  <div class="form">
+    <div><label for="freq">Częstotliwość [MHz]</label><input id="freq" type="number" step="0.25" min="863" max="870"><div class="hint" id="freqHint"></div></div>
+    <div><label for="pa">Moc nadawania [dBm]</label><input id="pa" type="number" min="-10" max="20" step="1"><div class="hint">od −10 do 20; zwiększ, gdy inwerter jest daleko</div></div>
+    <div><label>Stan radia</label><div id="radio" class="chk"></div></div>
+  </div>
+  <div class="actions"><button onclick="saveRadio()">Zapisz radio</button></div>
+</section>
+
+<section>
+  <h3>Hoymiles · mikroinwertery</h3>
+  <p class="sub">Numer seryjny (12 znaków) znajdziesz na naklejce falownika lub w aplikacji S-Miles.</p>
+  <table><thead><tr><th>Nazwa</th><th>Numer seryjny</th><th>Typ</th><th>Odpytywanie</th><th></th></tr></thead><tbody id="invs"></tbody></table>
+  <div class="form" style="margin-top:14px">
+    <div><label for="sn">Numer seryjny</label><input id="sn" type="text" maxlength="16" placeholder="np. 1520xxxxxxxx" autocomplete="off"></div>
+    <div><label for="nm">Nazwa</label><input id="nm" type="text" maxlength="31" placeholder="np. Dach południe"></div>
+    <div><button onclick="addInv()">Dodaj inwerter</button></div>
+  </div>
+  <div class="box">Zaawansowane opcje (kanały, moc paneli, limity) są w <a href="/settings/inverter">OpenDTU → Ustawienia → Inwertery</a>. Wyłącz oryginalną bramkę DTU Hoymiles, jeśli odpytuje ten sam inwerter.</div>
+</section>
+
+<section>
+  <h3>Hoymiles · panele na wejściach MPPT</h3>
+  <p class="sub">Inwerter mierzy cały string (napięcie, prąd, moc). Na tej podstawie Fusion szacuje wartości dla każdego panelu. Przy połączeniu szeregowym prąd jest wspólny, a moc i napięcie dzielone są proporcjonalnie do Vmp (jeśli podasz) albo do Wp.</p>
+  <div id="mpptCfg"><p class="mu">Brak inwerterów.</p></div>
+  <div class="actions"><button onclick="saveMppt()">Zapisz panele</button></div>
+  <div class="box">Dane Wp i Vmp znajdziesz na tabliczce panelu (Pmax, Vmp). Dla MIT-5000-8T suma Voc paneli w szeregu przy mrozie nie może przekroczyć 140 V. Panele o różnej mocy w jednym szeregu pracują z prądem słabszego panelu.</div>
+</section>
+
+<section>
+  <h3>SolarEdge · Modbus SunSpec</h3>
+  <p class="sub">Wybierz, jak Fusion łączy się z falownikiem: przez sieć (Modbus TCP) albo przewodem RS485 (Modbus RTU) do złącza A/B na płytce Fusion.</p>
+  <div class="form">
+    <div><label for="seTr">Sposób komunikacji</label><select id="seTr" onchange="seMode()"><option value="tcp">Modbus TCP (LAN / Wi-Fi)</option><option value="rtu">RS485 (Modbus RTU)</option></select><div class="hint">RS485: złącze A/B na Fusion</div></div>
+    <div class="tcp"><label for="seHost">Adres IP falownika</label><input id="seHost" type="text" placeholder="192.168.1.50" autocomplete="off"><div class="hint">najlepiej stały adres z routera</div></div>
+    <div class="tcp"><label for="sePort">Port</label><input id="sePort" type="number" min="1" max="65535"><div class="hint">domyślnie 1502 (czasem 502)</div></div>
+    <div class="rtu"><label for="seBaud">Prędkość RS485</label><select id="seBaud"><option>115200</option><option>57600</option><option>38400</option><option>19200</option><option>9600</option></select><div class="hint">domyślnie w SolarEdge 115200</div></div>
+    <div class="rtu"><label for="sePar">Format ramki</label><select id="sePar"><option value="0">8N1 (bez parzystości)</option><option value="1">8E1 (parzystość)</option><option value="2">8O1 (nieparzystość)</option></select><div class="hint">domyślnie 8N1</div></div>
+    <div><label for="seUnit">Modbus ID (Device ID)</label><input id="seUnit" type="number" min="1" max="247"><div class="hint">domyślnie 1</div></div>
+    <div><label for="seInt">Odczyt co [s]</label><input id="seInt" type="number" min="2" max="300"><div class="hint">minimum 2 s</div></div>
+    <div><label class="chk"><input id="seEn" type="checkbox"> Odczyt włączony</label><label class="chk"><input id="seMeter" type="checkbox"> Licznik SolarEdge (eksport/import)</label></div>
+  </div>
+  <div class="actions"><button onclick="saveSe()">Zapisz i sprawdź połączenie</button><button class="sec" onclick="testSe()">Sprawdź połączenie</button></div>
+  <div id="seRes" class="result" style="display:none"></div>
+  <div class="box tcp">SetApp: Commissioning → Site Communication → Modbus TCP → Enable (port 1502). SolarEdge przyjmuje tylko jedno połączenie Modbus TCP naraz. Wyłącz inne programy łączące się z falownikiem (np. integrację Home Assistant).</div>
+  <div class="box rtu">SetApp: Commissioning → Site Communication → RS485-1 (lub RS485-2, jeśli RS485-1 zajmuje licznik albo bateria) → Protocol: <b>SunSpec (Non-SE Logger)</b>, Device ID taki jak wyżej, Baud rate jak wyżej. Połącz A–A i B–B skrętką, masę (G) też. Na końcu długiej linii daj terminator 120 Ω. Falownik może mieć tylko jednego mastera Modbus: RS485 albo TCP, nie oba.</div>
+</section>
+
+<section>
+  <h3>Wyświetlacz OLED SSD1322 (256×64)</h3>
+  <p class="sub">Strony przełączasz przyciskiem BOOT (GPIO0): krótkie naciśnięcie – następna strona, przytrzymanie 1 s – automatyczne przełączanie wł./wył.</p>
+  <div class="form">
+    <div><label class="chk"><input id="dEn" type="checkbox"> Wyświetlacz podłączony</label><label class="chk"><input id="dFlip" type="checkbox"> Obróć o 180°</label></div>
+    <div><label for="dAuto">Automatyczne przełączanie</label><select id="dAuto"><option value="0">wyłączone</option><option value="5">co 5 s</option><option value="10">co 10 s</option><option value="15">co 15 s</option><option value="30">co 30 s</option><option value="60">co 60 s</option></select></div>
+    <div><label for="dSleep">Wygaszanie w nocy</label><select id="dSleep"><option value="0">nigdy</option><option value="1">po 1 min</option><option value="5">po 5 min</option><option value="10">po 10 min</option><option value="30">po 30 min</option><option value="60">po 60 min</option></select><div class="hint">bez produkcji i bez naciśnięcia przycisku</div></div>
+    <div><label for="dCon">Jasność</label><input id="dCon" type="range" min="10" max="255" step="5" style="width:100%"></div>
+  </div>
+  <label style="display:block;margin:14px 0 6px">Pokazywane strony</label>
+  <div id="dPages" class="pages"></div>
+  <div class="actions"><button onclick="saveDisp()">Zapisz wyświetlacz</button><button class="sec" onclick="nextDisp()">Następna strona</button></div>
+  <div class="box">Podłączenie do złącza wyświetlacza SPI: DIN→GPIO9, SCLK→GPIO10, CS→GPIO11, DC→GPIO12, RES→GPIO13, VCC→3V3, GND. Moduł musi być ustawiony w tryb 4-wire SPI. W OpenDTU (Ustawienia → Sprzęt) zostaw typ wyświetlacza „brak”.</div>
+</section>
+
+<section>
+  <h3>Karta microSD</h3>
+  <p class="sub" id="sdSub">–</p>
+  <div class="form">
+    <div><label for="sdInt">Zapis co</label><select id="sdInt"><option value="1">1 min</option><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option></select></div>
+    <div><label class="chk"><input id="sdEn" type="checkbox"> Zapis na kartę włączony</label></div>
+  </div>
+  <div class="box" style="margin-top:0;margin-bottom:12px">Podłączenie karty (tryb SDMMC 1-bit): CLK→GPIO14 (pin MISO złącza wyświetlacza), CMD→GPIO2 (SDA), D0→GPIO1 (SCL), CS/D3 karty przez 10 kΩ do 3V3, VCC→3V3, GND. Karta FAT32.</div>
+  <div class="actions"><button onclick="saveSd()">Zapisz</button><a class="btn sec" href="/sd">Pliki na karcie</a></div>
+</section>
+</main>
+<div id="toast"></div>
+<script>
+const $=id=>document.getElementById(id);
+const SE={1:'wyłączony',2:'uśpiony',3:'uruchamianie',4:'produkuje',5:'ograniczony',6:'wyłączanie',7:'błąd',8:'czuwanie'};
+let dtu=null;
+function toast(t,ok=true){const e=$('toast');e.textContent=t;e.style.background=ok?'#1f7a45':'#9b2c2c';e.style.display='block';clearTimeout(e._t);e._t=setTimeout(()=>e.style.display='none',3500);}
+async function get(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(r.status);return r.json();}
+async function post(u,obj){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(JSON.stringify(obj))});const j=await r.json().catch(()=>({}));if(!r.ok||j.type==='warning'||j.type==='danger')throw new Error(j.message||r.status);return j;}
+
+async function loadRadio(){
+  dtu=await get('/api/dtu/config');
+  $('freq').value=(dtu.cmt_frequency/1000).toFixed(3);
+  $('pa').value=dtu.cmt_palevel;
+  $('freqHint').textContent=`krok kanału ${dtu.cmt_chan_width} kHz`;
+  $('radio').innerHTML=(dtu.cmt_enabled?'<span class="pill ok">CMT2300A aktywne</span>':'<span class="pill err">CMT2300A nieaktywne</span>')+' '+(dtu.nrf_enabled?'<span class="pill">NRF24 aktywne</span>':'<span class="pill">NRF24 wyłączone</span>');
+}
+async function saveRadio(){
+  try{const o=Object.assign({},dtu);o.cmt_frequency=Math.round(parseFloat($('freq').value)*1000);o.cmt_palevel=parseInt($('pa').value);
+    await post('/api/dtu/config',o);toast('Zapisano ustawienia radia');loadRadio();}catch(e){toast('Błąd: '+e.message,false);}
+}
+async function loadInv(){
+  const j=await get('/api/inverter/list');
+  const rows=(j.inverter||[]).map(i=>`<tr><td>${esc(i.name)}</td><td>${i.serial}</td><td>${i.type==='Unknown'?'<span class="pill warn">nieznany</span>':esc(i.type)}</td><td>${i.poll_enable?'<span class="pill ok">tak</span>':'<span class="pill">nie</span>'}</td><td><button class="del" onclick="delInv(${i.id},'${esc(i.name)}')">Usuń</button></td></tr>`);
+  $('invs').innerHTML=rows.join('')||'<tr><td colspan="5" class="mu">Brak inwerterów — dodaj poniżej</td></tr>';
+}
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function addInv(){
+  const sn=$('sn').value.trim().replace(/\s/g,''),nm=$('nm').value.trim()||'MIT-5000-8T';
+  if(!/^[0-9a-fA-F]{12}$/.test(sn)){toast('Numer seryjny: 12 znaków (cyfry 0-9, litery A-F)',false);return;}
+  try{await post('/api/inverter/add',{serial:sn,name:nm});toast('Dodano inwerter '+nm);$('sn').value='';$('nm').value='';loadInv();}catch(e){toast('Błąd: '+e.message,false);}
+}
+async function delInv(id,name){if(!confirm('Usunąć inwerter '+name+'?'))return;try{await post('/api/inverter/del',{id});toast('Usunięto');loadInv();}catch(e){toast('Błąd: '+e.message,false);}}
+
+async function loadSe(){
+  const c=await get('/api/solaredge/config');
+  $('seTr').value=c.transport||'tcp';$('seBaud').value=String(c.baud||115200);$('sePar').value=String(c.parity||0);seMode();
+  $('seHost').value=c.host;$('sePort').value=c.port;$('seUnit').value=c.unit_id;$('seInt').value=c.interval;$('seEn').checked=c.enabled;$('seMeter').checked=c.read_meter;
+}
+function seMode(){const rtu=$('seTr').value==='rtu';document.querySelectorAll('.tcp').forEach(e=>e.style.display=rtu?'none':'');document.querySelectorAll('.rtu').forEach(e=>e.style.display=rtu?'':'none');}
+async function saveSe(){
+  const host=$('seHost').value.trim(),transport=$('seTr').value;
+  if(transport==='tcp'&&!/^[0-9A-Za-z.\-]{1,64}$/.test(host)){toast('Podaj adres IP lub nazwę falownika',false);return;}
+  try{await post('/api/solaredge/config',{transport,baud:+$('seBaud').value,parity:+$('sePar').value,host,port:+$('sePort').value,unit_id:+$('seUnit').value,interval:+$('seInt').value,enabled:$('seEn').checked,read_meter:$('seMeter').checked});
+    toast('Zapisano ustawienia SolarEdge');testSe(true);}catch(e){toast('Błąd: '+e.message,false);}
+}
+async function testSe(afterSave){
+  const r=$('seRes');r.style.display='block';r.className='result';r.textContent='Łączenie z falownikiem…';
+  const t0=Date.now();
+  if(afterSave)await new Promise(x=>setTimeout(x,2500));
+  for(;;){
+    let s;try{s=await get('/api/solaredge/status');}catch(e){r.className='result err';r.textContent='Brak odpowiedzi DTU';return;}
+    if(s.valid){r.className='result ok';r.innerHTML=`<b>Połączono</b> · ${esc(s.manufacturer)} ${esc(s.model)} · nr ser. ${esc(s.serial)} · wersja ${esc(s.version)}<br>Status: ${SE[s.status]||s.status_text} · moc AC ${Math.round(s.ac.power)} W · napięcie L1 ${s.ac.voltage_l1.toFixed(1)} V`+(s.meter?` · licznik: ${s.meter.power>=0?'eksport':'pobór'} ${Math.abs(Math.round(s.meter.power))} W`:'');return;}
+    if(Date.now()-t0>20000){r.className='result err';r.innerHTML=`<b>Brak połączenia</b> · ${esc(s.last_error||'brak odpowiedzi')}<br>`+($('seTr').value==='rtu'?'Sprawdź przewody A/B (spróbuj zamienić), Device ID, prędkość i czy port RS485 w SetApp ma protokół SunSpec (Non-SE Logger).':'Sprawdź adres IP, port, czy Modbus TCP jest włączony w SetApp i czy nie łączy się inny program.');return;}
+    await new Promise(x=>setTimeout(x,2000));
+  }
+}
+async function loadSd(){
+  const s=await get('/api/sd/status');
+  $('sdInt').value=s.interval;$('sdEn').checked=s.enabled;
+  $('sdSub').innerHTML=!s.available?`<span class="pill warn">błąd</span> ${esc(s.reason)}`:(s.mounted?`<span class="pill ok">karta ${esc(s.card_type)}</span> zajęte ${s.used_mb} MB z ${(s.total_mb/1024).toFixed(1)} GB · ostatni zapis ${esc(s.last_write||'–')}`:`<span class="pill warn">brak karty</span> ${esc(s.reason)}`);
+}
+async function saveSd(){try{await post('/api/sd/config',{enabled:$('sdEn').checked,interval:+$('sdInt').value});toast('Zapisano ustawienia karty');loadSd();}catch(e){toast('Błąd: '+e.message,false);}}
+
+let MC=null;
+async function loadMppt(){
+  MC=await get('/api/mppt/config');
+  const I=MC.inverters||[];
+  if(!I.length){$('mpptCfg').innerHTML='<p class="mu">Najpierw dodaj inwerter.</p>';return;}
+  $('mpptCfg').innerHTML=I.map((v,vi)=>`<div class="invblk"><div class="invh">${esc(v.name)} <span class="mu">${esc(v.type)} · ${esc(v.serial)}</span></div>`+
+   v.channels.map((c,ci)=>{const p=c.panels||[{},{}];const id=`m${vi}_${ci}`;
+    const pf=(k)=>`<div class="pan"><div class="pl">Panel ${k+1}</div>
+      <div><label for="${id}n${k}">Nazwa</label><input id="${id}n${k}" type="text" maxlength="24" value="${esc(p[k]&&p[k].name||'')}" placeholder="np. ${k?'JA 450':'Longi 410'}"></div>
+      <div><label for="${id}w${k}">Moc [Wp]</label><input id="${id}w${k}" type="number" min="0" max="2000" value="${p[k]&&p[k].wp||''}" placeholder="0 = brak"></div>
+      <div><label for="${id}v${k}">Vmp [V]</label><input id="${id}v${k}" type="number" min="0" max="140" step="0.1" value="${p[k]&&p[k].vmp||''}" placeholder="opcjonalnie"></div></div>`;
+    return `<div class="mpp"><div class="mph"><b>MPPT ${c.ch}</b>${c.name?` <span class="mu">${esc(c.name)}</span>`:''}
+      <select id="${id}s" aria-label="Połączenie paneli MPPT ${c.ch}"><option value="1"${c.series!==false?' selected':''}>szeregowo</option><option value="0"${c.series===false?' selected':''}>równolegle</option></select></div>${pf(0)}${pf(1)}</div>`}).join('')+'</div>').join('');
+}
+async function saveMppt(){
+  if(!MC)return;const out={};
+  MC.inverters.forEach((v,vi)=>{out[v.serial]=v.channels.map((c,ci)=>{const id=`m${vi}_${ci}`;
+    return {series:$(id+'s').value==='1',panels:[0,1].map(k=>({name:$(id+'n'+k).value.trim(),wp:+$(id+'w'+k).value||0,vmp:+$(id+'v'+k).value||0}))};});});
+  try{await post('/api/mppt/config',out);toast('Zapisano konfigurację paneli');}catch(e){toast('Błąd: '+e.message,false);}
+}
+
+async function loadDisp(){
+  const c=await get('/api/fusion/display');
+  $('dEn').checked=c.enabled;$('dFlip').checked=c.flip;$('dAuto').value=c.auto_sec;$('dSleep').value=c.sleep_min;$('dCon').value=c.contrast;
+  $('dPages').innerHTML=c.pages.map(p=>`<label class="chk"><input type="checkbox" data-p="${p.id}"${p.on?' checked':''}> ${esc(p.name)}</label>`).join('');
+}
+async function saveDisp(){
+  let mask=0;document.querySelectorAll('#dPages input').forEach(i=>{if(i.checked)mask|=1<<+i.dataset.p;});
+  if(!mask){toast('Wybierz co najmniej jedną stronę',false);return;}
+  try{await post('/api/fusion/display',{enabled:$('dEn').checked,flip:$('dFlip').checked,auto_sec:+$('dAuto').value,sleep_min:+$('dSleep').value,contrast:+$('dCon').value,pages:mask});toast('Zapisano ustawienia wyświetlacza');}catch(e){toast('Błąd: '+e.message,false);}
+}
+async function nextDisp(){try{await post('/api/fusion/display/next',{});}catch(e){toast('Błąd: '+e.message,false);}}
+
+loadDisp().catch(()=>{});loadMppt().catch(()=>{});loadRadio().catch(()=>{});loadInv().catch(()=>{});loadSe().catch(()=>{});loadSd().catch(()=>{});
+</script>

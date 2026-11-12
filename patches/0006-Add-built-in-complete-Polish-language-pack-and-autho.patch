@@ -1,0 +1,440 @@
+From 3171d9227f3159bb529e461fc858e9838d2ec6e0 Mon Sep 17 00:00:00 2001
+From: okty111 <okty111@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 17:25:14 +0000
+Subject: [PATCH 6/7] Add built-in complete Polish language pack and author
+ credit
+
+Co-authored-by: Perplexity <noreply@perplexity.ai>
+---
+ include/FusionLang.h  |   8 +++
+ include/FusionPages.h |   8 ++-
+ include/HistoryPage.h |   4 +-
+ include/LangPackPl.h  |   6 +++
+ include/defaults.h    |   2 +-
+ lang/pl.lang.json     | 122 ++++++++++++++++++++++++++++++++++++------
+ src/FusionLang.cpp    |  48 +++++++++++++++++
+ src/main.cpp          |   2 +
+ 8 files changed, 181 insertions(+), 19 deletions(-)
+ create mode 100644 include/FusionLang.h
+ create mode 100644 include/LangPackPl.h
+ create mode 100644 src/FusionLang.cpp
+
+diff --git a/include/FusionLang.h b/include/FusionLang.h
+new file mode 100644
+index 0000000..81d010d
+--- /dev/null
++++ b/include/FusionLang.h
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++// Instaluje wbudowana polska paczke jezykowa (/pl.lang.json) w LittleFS,
++// jesli jej brak albo jest starsza wersja. Wywolac przed I18n.init().
++namespace FusionLang {
++void install();
++}
+diff --git a/include/FusionPages.h b/include/FusionPages.h
+index d2dce53..bcceb68 100644
+--- a/include/FusionPages.h
++++ b/include/FusionPages.h
+@@ -85,10 +85,12 @@ footer{color:var(--mu);font-size:12px;text-align:center;padding:8px 0 24px}
+  .top{padding:10px 14px}
+ }
+ @media (prefers-reduced-motion:reduce){.side{transition:none}}
++
++.side .foot .cred{display:block;margin-top:8px;padding-top:8px;border-top:1px solid var(--bd);font-size:11.5px;line-height:1.4;opacity:.85}
+ </style>
+ </head>
+ <body>
+-<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<br><span id="sideSt">dane lokalne, bez chmury</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Karta microSD</h1><div class="t" id="now"></div></div>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Karta microSD</h1><div class="t" id="now"></div></div>
+ <main>
+ <section><h3>Stan karty</h3><p class="sub" id="st">–</p>
+   <div class="actions" id="quick"></div></section>
+@@ -220,10 +222,12 @@ footer{color:var(--mu);font-size:12px;text-align:center;padding:8px 0 24px}
+  .top{padding:10px 14px}
+ }
+ @media (prefers-reduced-motion:reduce){.side{transition:none}}
++
++.side .foot .cred{display:block;margin-top:8px;padding-top:8px;border-top:1px solid var(--bd);font-size:11.5px;line-height:1.4;opacity:.85}
+ </style>
+ </head>
+ <body>
+-<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<br><span id="sideSt">dane lokalne, bez chmury</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Ustawienia falowników</h1><div class="t" id="now"></div></div>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Ustawienia falowników</h1><div class="t" id="now"></div></div>
+ <main>
+ 
+ <section>
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 7c0ca69..5cc7812 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -85,6 +85,8 @@ footer{color:var(--mu);font-size:12px;text-align:center;padding:8px 0 24px}
+  .top{padding:10px 14px}
+ }
+ @media (prefers-reduced-motion:reduce){.side{transition:none}}
++
++.side .foot .cred{display:block;margin-top:8px;padding-top:8px;border-top:1px solid var(--bd);font-size:11.5px;line-height:1.4;opacity:.85}
+ main.dash{max-width:1040px}
+ tr.sum td{font-weight:600}tr.cur td{background:#2b6cb011}
+ .sm{display:none}@media(max-width:640px){.sm{display:inline}.lg{display:none}}
+@@ -164,7 +166,7 @@ section.chart{overflow:visible}
+ </style>
+ </head>
+ <body>
+-<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<br><span id="sideSt">dane lokalne, bez chmury</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Mój dom</h1><div class="t" id="now"></div></div>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Mój dom</h1><div class="t" id="now"></div></div>
+ <main class="dash">
+   <div class="hero night" id="hero">
+     <svg class="scene" viewBox="0 0 800 260" preserveAspectRatio="xMinYMax slice" aria-hidden="true">
+diff --git a/include/LangPackPl.h b/include/LangPackPl.h
+new file mode 100644
+index 0000000..30ff7c0
+--- /dev/null
++++ b/include/LangPackPl.h
+@@ -0,0 +1,6 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Wbudowana polska paczka jezykowa OpenDTU (generowana z lang/pl.lang.json)
++#pragma once
++#include <Arduino.h>
++#define FUSION_LANG_PL_REV "fusion-1"
++static const char FUSION_LANG_PL[] PROGMEM = R"FUSIONLANG({"meta":{"name":"Polski","code":"pl","rev":"fusion-1"},"display":{"date_format":"%d.%m.%Y %H:%M","offline":"Offline","power_w":"%.0f W","power_kw":"%.1f kW","yield_today_wh":"Dzisiaj: %4.0f Wh","yield_today_kwh":"Dzisiaj: %.1f kWh","yield_total_kwh":"Razem: %.1f kWh","yield_total_mwh":"Razem: %.0f kWh"},"webapp":{"menu":{"LiveView":"Dane na żywo","Settings":"Ustawienia","NetworkSettings":"Ustawienia sieciowe","NTPSettings":"Ustawienia serwera NTP","MQTTSettings":"Ustawienia serwera MQTT","InverterSettings":"Ustawienia falownika","SecuritySettings":"Ustawienia zabezpieczeń","LoggingSettings":"Ustawienia logowania","DTUSettings":"Ustawienia DTU","DeviceManager":"Zarządzanie urządzeniami","ConfigManagement":"Zarządzanie konfiguracją","FirmwareUpgrade":"Aktualizacja oprogramowania","DeviceReboot":"Ponowne uruchomienie DTU","Info":"Informacje","System":"System","Network":"Sieć","NTP":"NTP","MQTT":"MQTT","Console":"Konsola","About":"Informacje DTU","Logout":"Wyloguj","Login":"Zaloguj"},"base":{"Loading":"Ładowanie...","Reload":"Załaduj ponownie","Cancel":"Anuluj","Save":"Zapisz","Refreshing":"Odświeżanie","Pull":"Przeciągnij w dół, aby zaktualizować","Release":"Wydanie w celu aktualizacji","Close":"Zamknij","Yes":"Tak","No":"Nie"},"wait":{"NotReady":"OpenDTU nie jest jeszcze gotowy","PleaseWait":"Proszę czekać. Zostaniesz automatycznie przekierowany na stronę główną."},"Error":{"Oops":"Ups!"},"localeswitcher":{"Dark":"Ciemny","Light":"Jasny","Auto":"Automatyczny"},"dataagedisplay":{"DataAge":"Aktualizacja danych","SecondsSince":"0 sekund | 1 sekund | {n} sekund"},"apiresponse":{"1001":"Ustawienia zapisane!","1002":"Nie znaleziono żadnych wartości!","1003":"Dane są za duże!","1004":"Nie udało się przeanalizować danych!","1005":"Brak wartości!","1006":"Zapis nie powiódł się!","2001":"Seria nie może wynosić zero!","2002":"Przedział odpytywania musi być większy od zera!","2003":"Nieprawidłowe ustawienie poziomu mocy!","2004":"Częstotliwość musi być ustawiona pomiędzy {min} a {max} kHz i musi być wielokrotnością 250 kHz!","2005":"Nieprawidłowy wybór kraju!","3001":"Niczego nie usunięto!","3002":"Reset konfiguracji. Trwa ponowne uruchamianie...","3003":"File successful deleted. Restart to apply changes!","4001":"@:apiresponse.2001","4002":"Nazwa musi mieć od 1 do {max} znaków!","4003":"Only {max} inverters are supported!","4004":"Inwerter utworzony!","4005":"Podano nieprawidłowy identyfikator!","4006":"Podano nieprawidłową ilość maksymalnego ustawienia kanału!","4007":"Inwerter zmieniony!","4008":"Inwerter usunięty!","4009":"Zamówienie falownika zapisane!","4011":"Limit czasu odpowiedzi fragmentu musi wynosić 0 (automatycznie) lub być liczbą całkowitą od 50 do 5000 ms!","4012":"Limit ponowień fragmentów musi wynosić 0 (automatycznie) lub być liczbą całkowitą od 1 do 50!","5001":"@:apiresponse.2001","5002":"Ograniczenie musi wynosić od 1 do {max}!","5003":"Podano nieprawidłowy typ!","5004":"Określono nieprawidłowy falownik!","6001":"Wykonano ponowne uruchomienie!","6002":"Ponowne uruchomienie anulowane!","7001":"Serwer MQTT musi mieć od 1 do {max} znaków!","7002":"Nazwa użytkownika nie może być dłuższa niż {max} znaków!","7003":"Hasło nie może być dłuższe niż {max} znaków!","7004":"Temat nie może być dłuższy niż {max} znaków","7005":"Temat nie może zawierać spacji!","7006":"Temat musi kończyć się ukośnikiem (/)!","7007":"Port musi być liczbą z zakresu od 1 do 65535!","7008":"Certyfikat nie może być dłuższy niż {max} znaków!","7009":"Temat LWT nie może być dłuższy niż {max} znaków!","7010":"Temat LWT nie może zawierać spacji!","7011":"Wartość LWT online nie może być dłuższa niż {max} znaków!","7012":"Wartość offline LWT nie może być dłuższa niż {max} znaków!","7013":"Interwał publikacji musi być liczbą z zakresu od {min} do {max}!","7014":"Temat Hass nie może być dłuższy niż {max} znaków!","7015":"Temat Hass nie może zawierać spacji!","7016":"LWT QOS nie może być większy niż {max}!","7017":"Identyfikator klienta nie może być dłuższy niż {max} znaków!","7018":"Hass topic must end with slash (/)!","8001":"Adres IP jest nieprawidłowy!!","8002":"Maska sieci jest nieprawidłowa!","8003":"Brama jest nieprawidłowa!","8004":"Adres IP serwera DNS 1 jest nieprawidłowy!","8005":"Adres IP serwera DNS 2 jest nieprawidłowy!","8006":"Wartość limitu czasu administracyjnego punktu dostępowego jest nieprawidłowa","8007":"Syslog Server must between 1 and {max} characters long!","8008":"Port must be a number between 1 and 65535!","9001":"Serwer NTP musi mieć od 1 do {max} znaków!","9002":"Strefa czasowa musi mieć długość od 1 do {max} znaków!!","9003":"Opis strefy czasowej musi mieć od 1 do {max} znaków!","9004":"Rok musi być liczbą z zakresu od {min} do {max}!","9005":"Miesiąc musi być liczbą z zakresu od {min} do {max}","9006":"Dzień musi być liczbą z zakresu od {min} do {max}!","9007":"Godzina musi być liczbą z zakresu od {min} do {max}!","9008":"Minuta musi być liczbą z zakresu od {min} do {max}!","9009":"Sekunda musi być liczbą z zakresu od {min} do {max}!","9010":"Czas zaktualizowany!","10001":"Hasło musi mieć od 8 do {max} znaków!","10002":"Uwierzytelnienie powiodło się!","11001":"@:apiresponse.2001","11002":"@:apiresponse.5004","12001":"Profil musi mieć od 1 do {max} znaków!"},"home":{"LiveData":"Dane na żywo","SerialNumber":"Numer seryjny: ","CurrentLimit":"Aktualny limit","ShowSetInverterLimit":"Pokaż / ustaw limit mocy","TurnOnOff":"Włącz / wyłącz falownik","ShowInverterInfo":"Pokaż informacje o falowniku","ShowEventlog":"Pokaż dziennik zdarzeń","ReportedEventCount":"Licznik zdarzeń zgłoszony przez falownik: {count}","Loading":"@:base.Loading","EventLog":"Dziennik zdarzeń","InverterInfo":"Informacje o falowniku","LimitSettings":"Ustawienia limitu mocy","LastLimitSetStatus":"Stan ostatniego ustawionego limitu","SetLimit":"Ustaw limit na","Relative":"Procent (%)","Absolute":"Asolut (W)","LimitHint":"<b>Uwaga:</b> Jeśli ustawisz limit bezwzględny, wartość na wyświetlaczu zostanie zaktualizowana po około 4 minutach.","SetPersistent":"Ustaw limit na stałe","SetNonPersistent":"Ustaw limit tymczasowo","PowerSettings":"Ustawienia zasilania","LastPowerSetStatus":"Ostatni stan falownika","TurnOn":"Włącz falownik","TurnOff":"Wyłącz falownik","Restart":"Uruchom ponownie falownik","Failure":"Niepowodzenie","Pending":"Oczekuje","Ok":"Ok","Unknown":"Nieznany","ShowGridProfile":"Pokaż ustawienia falownika","GridProfile":"Ustawienia falownika","LoadingInverter":"Oczekiwanie na dane... (może potrwać do 10 sekund)","RadioStats":"Statystyki radiowe","TxRequest":"Liczba żądań TX","RxSuccess":"Sukces RX","RxFailNothing":"Błąd odbioru RX: Nic nie odbieram","RxFailPartial":"Błąd odbioru RX: Odbiór częściowy","RxFailCorrupt":"Błąd odbioru RX: Odbiór uszkodzony","TxReRequest":"Fragment ponownego żądania TX","StatsReset":"Resetuj statystyki","StatsResetting":"Resetowanie...","Rssi":"RSSI ostatniego odebranego pakietu","RssiHint":"Inwertery HM obsługują tylko wartości RSSI < -64 dBm i > -64 dBm. W tym przypadku pokazane jest -80 dbm i -30 dbm..","dBm":"{dbm} dBm","UnreadMessages":"nieprzeczytane wiadomości"},"eventlog":{"Start":"Start","Stop":"Koniec","Id":"Identyfikator","Message":"Wiadomość","ReportedCount":"Licznik zdarzeń zgłoszony przez falownik","StoredCount":"Szczegóły zdarzeń przechowywane przez OpenDTU","ReportedCountHint":"Licznik rośnie, gdy falownik zapisze nowe zdarzenie. Nie jest to liczba aktualnie aktywnych błędów.","DetailsUnavailable":"Nie odebrano jeszcze aktualnych szczegółów zdarzeń. OpenDTU spróbuje ponownie automatycznie.","DetailsPending":"OpenDTU pobiera aktualne szczegóły zdarzeń."},"devinfo":{"NoInfo":"Informacje niedostępne","NoInfoLong":"Nadal brak informacji z falownika. Próbuję ponownie...","UnknownModel":"Nieznany model! Podaj „Numer części sprzętu” i model (przykład HM-350) w numerze problemu na  <a href=\"https://github.com/tbnobody/OpenDTU/issues\" target=\"_blank\">GitHub</a>.","Serial":"Numer seryjny","ProdYear":"Produkcja roczna","ProdWeek":"Produkcja tygodniowa","Model":"Model","DetectedMaxPower":"Wykryto maksymalną moc","BootloaderVersion":"Wersja bootloadera","FirmwareVersion":"Wersja oprogramowania","FirmwareBuildDate":"Data oprogramowania sprzętowego","HardwarePartNumber":"Numer części sprzętu","HardwareVersion":"Wersja sprzętu","SupportsPowerDistributionLogic":"Obsługa funkcji 'Power Distribution Logic'","RfHardwareVersion":"Wersja sprzętowa modułu radiowego","RfFirmwareVersion":"Wersja oprogramowania modułu radiowego","Yes":"@:base.Yes","No":"@:base.No"},"gridprofile":{"NoInfo":"@:devinfo.NoInfo","NoInfoLong":"@:devinfo.NoInfoLong","Name":"Nazwa","Version":"Wersja","Enabled":"@:wifistationinfo.Enabled","Disabled":"@:wifistationinfo.Disabled","GridprofileSupport":"Wsparcie dla programistów","GridprofileSupportLong":"Kliknij <a href=\"https://github.com/tbnobody/OpenDTU/wiki/Grid-Profile-Parser\" target=\"_blank\">tutaj</a> aby uzyskać więcej informacji."},"systeminfo":{"SystemInfo":"Informacje o systemie","VersionError":"Błąd podczas odbierania wersji","VersionNew":"Dostępna nowa wersja! Pokaż aktualizacje!","VersionOk":"Już zaktualizowano!"},"firmwareinfo":{"FirmwareInformation":"Informacje o oprogramowaniu","Hostname":"Nazwa hosta","SdkVersion":"Wersja SDK","ConfigVersion":"Wersja konfiguracji","FirmwareVersion":"Wersja oprogramowania / Git Hash","FirmwareBranch":"Gałąź oprogramowania","CompileDateTime":"Compile Date/Time (UTC)","PioEnv":"Środowisko PIO","FirmwareVersionHint":"Kliknij tutaj, aby wyświetlić informacje o aktualnej wersji","FirmwareUpdate":"Aktualizacja oprogramowania","FirmwareUpdateHint":"Kliknij tutaj, aby zobaczyć zmiany pomiędzy Twoją wersją a najnowszą wersją","FrmwareUpdateAllow":"Po aktywowaniu sprawdzania aktualizacji, przy każdym wywołaniu strony do GitHub.com wysyłane jest żądanie pobrania aktualnie dostępnej wersji. Jeśli się z tym nie zgadzasz, pozostaw tę funkcję dezaktywowaną.","ResetReason0":"Powód resetowania CPU 0","ResetReason1":"Powód resetowania CPU 1","ConfigSaveCount":"Liczba zapisów konfiguracji","Uptime":"Czas działania","UptimeValue":"0 dni {time} | 1 dzien {time} | {count} dni {time}"},"hardwareinfo":{"HardwareInformation":"Informacje o sprzęcie","ChipModel":"Model chipa","ChipRevision":"Rewizja chipa","ChipCores":"Ilość rdzenii chipa","CpuFrequency":"Częstotliwość procesora CPU","Mhz":"MHz","CpuTemperature":"Temperatura procesora CPU","FlashSize":"Rozmiar pamięci Flash"},"memoryinfo":{"MemoryInformation":"Informacje o pamięci","Type":"Typ","Usage":"Wykorzystanie","Free":"Wolnej","Used":"Używany","Size":"Rozmiar","Heap":"Sterta","PsRam":"PSRAM","LittleFs":"MałeFs","Sketch":"Szkic"},"memorydetails":{"HeapDetails":"Szczegóły pamięci sterty","PsramDetails":"PSRAM Details","TotalFree":"Całkowita wolna pamięć","LargestFreeBlock":"Największy wolny ciągły blok","MaxUsage":"Maksymalne użycie od uruchomienia","Fragmentation":"Poziom fragmentacji"},"taskdetails":{"TaskDetails":"Szczegóły Zadania","Name":"Nazwa","StackFree":"Bez stosu","Priority":"Priorytet","Core":"Rdzeń","Task_idle0":"Idle (CPU Core 0)","Task_idle1":"Idle (CPU Core 1)","Task_wifi":"Wi-Fi","Task_tit":"TCP/IP","Task_looptask":"Główna pętla Arduino","Task_asynctcp":"Asynchroniczny TCP","Task_mqttclient":"Klient MQTT"},"radioinfo":{"RadioInformation":"Informacje o nadajniku-odbiorniku radiowym","Status":"{module} Status","ChipStatus":"{module} Stan chipa","ChipType":"{module} Typ chipa","Connected":"połączony","NotConnected":"nie połączono","Configured":"skonfigurowany","NotConfigured":"nie skonfigurowano","Unknown":"Nieznany"},"networkstatus":{"Title":"Stan sieci na żywo","Unavailable":"Brak połączenia z OpenDTU. Połącz się ponownie z jego punktem dostępowym lub siecią domową. Stan odświeży się automatycznie; ostatni stan połączenia nie jest już aktualny.","TargetSsid":"Zapisana sieć Wi-Fi","ConnectedSsid":"Połączona sieć Wi-Fi","NextAttempt":"Następna próba połączenia","RetryIn":"Za {seconds} s","DisconnectReason":"Ostatnie rozłączenie","AccessPoint":"Punkt dostępowy OpenDTU","EthernetConnected":"Ethernet połączony","EthernetDisconnected":"Ethernet rozłączony","States":{"not_configured":"Nie skonfigurowano sieci Wi-Fi","disabled":"Tryb klienta Wi-Fi wyłączony","paused":"Wstrzymano ponawianie Wi-Fi, aby punkt dostępowy był dostępny","connecting":"Łączenie z zapisaną siecią Wi-Fi","waiting_for_ip":"Połączono z Wi-Fi; oczekiwanie na adres IP","connected":"Wi-Fi połączone"},"Reasons":{"StationLeft":"Urządzenie opuściło sieć","HandshakeTimeout":"Przekroczono czas uzgadniania; sprawdź hasło i sygnał","SignalLost":"Utracono sygnał Wi-Fi","NetworkNotFound":"Nie znaleziono sieci Wi-Fi","AuthenticationFailed":"Błąd uwierzytelniania; sprawdź hasło Wi-Fi","AssociationFailed":"Nie udało się połączyć z punktem dostępowym Wi-Fi","Other":"Rozłączono"}},"networkinfo":{"NetworkInformation":"Informacje o sieci"},"wifistationinfo":{"WifiStationInfo":"Informacje o Wi-Fi (stacja)","Status":"Stan","Enabled":"włączone","Disabled":"wyłączone","Ssid":"SSID","Bssid":"BSSID","Quality":"Jakość","Rssi":"RSSI"},"wifiapinfo":{"WifiApInfo":"Informacje o Wi-Fi (punkt dostępu)","Status":"@:wifistationinfo.Status","Enabled":"@:wifistationinfo.Enabled","Disabled":"@:wifistationinfo.Disabled","Ssid":"@:wifistationinfo.Ssid","Stations":"Liczba stacji"},"interfacenetworkinfo":{"NetworkInterface":"Interfejs sieciowy ({iface})","Hostname":"@:firmwareinfo.Hostname","IpAddress":"Adres IP","Netmask":"Maska sieci","DefaultGateway":"Brama","Dns":"DNS {num}","MacAddress":"Adres MAC"},"interfaceapinfo":{"NetworkInterface":"Interfejs sieciowy (punkt dostępu)","IpAddress":"@:interfacenetworkinfo.IpAddress","MacAddress":"@:interfacenetworkinfo.MacAddress"},"ntpinfo":{"NtpInformation":"Informacje NTP","ConfigurationSummary":"Podsumowanie konfiguracji","Server":"Serwer","Timezone":"Strefa czasowa","TimezoneDescription":"Opis strefy czasowej","CurrentTime":"Aktualna data/godzina","Status":"Stan","Synced":"zsynchronizowane","NotSynced":"nie zsynchronizowano","LocalTime":"Czas lokalny","Sunrise":"Świt","Sunset":"Zachód słońca","NotAvailable":"Niedostępny","Mode":"Tryb","Day":"Dzień","Night":"Noc"},"mqttinfo":{"MqttInformation":"Informacje MQTT","ConfigurationSummary":"@:ntpinfo.ConfigurationSummary","Status":"@:ntpinfo.Status","Enabled":"Włączone","Disabled":"Wyłączone","Server":"@:ntpinfo.Server","Port":"Port","ClientId":"Identyfikator klienta","Username":"Nazwa użytkownik","BaseTopic":"Temat podstawowy","PublishInterval":"Interwał publikacj","Seconds":"{sec} sekund","CleanSession":"Czyszczenie sesji","Retain":"Zachowaj","Tls":"TLS","RootCertifcateInfo":"Informacje o certyfikacie głównego urzędu certyfikacji","TlsCertLogin":"Zaloguj się przy użyciu certyfikatu TLS","ClientCertifcateInfo":"Informacje o certyfikacie klienta","HassSummary":"Podsumowanie konfiguracji automatycznego wykrywania MQTT Home Assistant","Expire":"Wygasa","IndividualPanels":"Indywidualny Panel","RuntimeSummary":"Podsumowanie czasu wykonania","ConnectionStatus":"Stan połączenia","Connected":"połączony","Disconnected":"rozłączony"},"console":{"Console":"Konsola","VirtualDebugConsole":"Wirtualna konsola debugowania","EnableAutoScroll":"Włącz automatyczne przewijani","ClearConsole":"Wyczyść konsolę","CopyToClipboard":"Kopiuj do schowka","Download":"Pobierz","RegularExpression":"Wyrażenie regularne","Lines":"{lines} Linii","LogLevel":"Poziom logowania ({cnt})"},"inverterchannelinfo":{"String":"Numer panelu {num}","Phase":"Faza {num}","ACOutput":"Wyjście AC","General":"Ogólne"},"invertertotalinfo":{"TotalYieldTotal":"Całkowita produkcjia energii","TotalYieldDay":"Dzienna produkcja energii","TotalPower":"Chwilowa moc"},"inverterchannelproperty":{"Power":"Moc","MaxDailyPower":"Max Power","Voltage":"Napięcie","Current":"Prąd","Voltage Ph1-N":"Napięcie L1-N","Current Ph1":"Prąd L1","Voltage Ph2-N":"Napięcie L2-N","Current Ph2":"Prąd L2","Voltage Ph3-N":"Napięcie L3-N","Current Ph3":"Prąd L3","Power DC":"Zasilanie DC","YieldDay":"Dzienna produkcja energii","YieldTotal":"Całkowita produkcja energii","Frequency":"Częstotliwość","Temperature":"Temperatura","MaxTemperature":"Max Temperature","PowerFactor":"Współczynnik mocy","ReactivePower":"Moc bierna","Efficiency":"Wydajność","Irradiation":"Nasłonecznienie","RawStatus":"Wartość statusu (nierozkodowana)"},"maintenancereboot":{"DeviceReboot":"Ponowne uruchomienie DTU","PerformReboot":"Wykonaj ponowne uruchomienie","Reboot":"Uruchom ponownie","Cancel":"@:base.Cancel","RebootOpenDTU":"Uruchom ponownie OpenDTU","RebootQuestion":"Czy na pewno chcesz zrestartować DTU?","RebootHint":"<b>Uwaga:</b> Zwykle nie ma potrzeby ponownego uruchamiania OpenDTU, ponieważ w razie potrzeby automatycznie uruchamia się ponownie (na przykład po aktualizacji oprogramowania sprzętowego). Zmiany w konfiguracji są zapamiętywane natychmiast, bez konieczności ponownego uruchamiania. Jeśli konieczne jest ponowne uruchomienie komputera z powodu błędu. Zgłoś to nam, klikając <a href=\"https://github.com/tbnobody/OpenDTU/issues\" class=\"alert-link\" target=\"_blank\">https://github.com/tbnobody/OpenDTU/issues</a>."},"dtuadmin":{"DtuSettings":"Ustawienia DTU","DtuConfiguration":"Konfiguracja DTU","Serial":"Serial","SerialHint":"Zarówno jednostka DTU, jak i falownik posiadają numer seryjny. Numer seryjny DTU jest generowany losowo przy pierwszym uruchomieniu i zwykle nie trzeba go zmieniać.","PollInterval":"Interwał odpytywania","Seconds":"Sekundy","NrfPaLevel":"Moc nadajnika NRF24","CmtPaLevel":"Moc nadajnika CMT2300A","NrfPaLevelHint":"Używane w falownikach HM. Należy pamiętać, że zwiększenie mocy zwiększa zużycie prądu.","CmtPaLevelHint":"Używane w falownikach HMS/HMT. Należy pamiętać, że zwiększenie mocy zwiększa zużycie prądu.","CmtCountry":"CMT2300A Obszar/Kraj","CmtCountryHint":"Każda strefa ma inny przydział użytecznych częstotliwości.","country_0":"Europa ({min}MHz - {max}MHz)","country_1":"Ameryka Północna ({min}MHz - {max}MHz)","country_2":"Brazylia ({min}MHz - {max}MHz)","CmtFrequency":"Częstotliwość CMT2300A","CmtFrequencyHint":"Uważaj, aby używać wyłącznie częstotliwości dozwolonych w Twoim kraju! Po zmianie częstotliwości ponowne nawiązanie połączenia może zająć do 15 minut","CmtFrequencyWarning":"Wybrana częstotliwość jest poza zakresem wybranym przez Twój kraj. Sprawdź, czy wybrana częstotliwość nie narusza przepisów obowiązujących w Twoim kraju.","MHz":"{mhz} MHz","dBm":"{dbm} dBm","Min":"Minima ({db} dBm)","Low":"Bassa ({db} dBm)","High":"Alta ({db} dBm)","Max":"Massima ({db} dBm)"},"securityadmin":{"SecuritySettings":"Ustawienia zabezpieczeń","AdminPassword":"Hasło administratora","Password":"Hasło","RepeatPassword":"Powtórz hasło","PasswordHint":"Hasło administracyjne służy nie tylko do uzyskania dostępu do tego interfejsu internetowego (z użytkownikiem „admin”), ale także do połączenia z urządzeniem w trybie AP. Musi mieć od 8 do 64 pismo.","Permissions":"Uprawnienia","ReadOnly":"Zezwalaj na dostęp do Internetu w trybie tylko do odczytu, bez konieczności podawania hasła"},"ntpadmin":{"NtpSettings":"Ustawienia NTP (data/godzina)","NtpConfiguration":"Konfiguracja NTP","TimeServer":"Serwer NTP","TimeServerHint":"Możesz pozostawić wartość domyślną, na wypadek, gdyby OpenDTU miało dostęp do Internetu.","Timezone":"Strefa czasowa","TimezoneConfig":"Konfiguracja strefy czasowej","LocationConfiguration":"Konfiguracja lokalizacji","Longitude":"Długość geograficzna","Latitude":"Szerokość geograficzna","SunSetType":"Typ SunSet","SunSetTypeHint":"Wpływa na obliczenie czasu wschodu/zachodu słońca. Po potwierdzeniu zmiana zacznie obowiązywać w ciągu jednej minuty.","OFFICIAL":"Świt standardowy (90,8°)","NAUTICAL":"Świt żeglarski (102°)","CIVIL":"Świt cywilny (96°)","ASTONOMICAL":"Astronomiczny świt (108°)","ManualTimeSynchronization":"Ręczna synchronizacja daty/czasu","CurrentOpenDtuTime":"Aktualny czas OpenDTU","CurrentLocalTime":"Aktualny czas lokalny","SynchronizeTime":"Synchronizuj datę/godzinę","SynchronizeTimeHint":"<b>Uwaga:</b> Możesz użyć ręcznej synchronizacji, aby ustawić datę/godzinę w przypadku, gdy serwer NTP nie jest dostępny. W tym przypadku data/godzina zostanie utracona w przypadku awarii zasilania. Również , przy ręcznej synchronizacji nastąpi stopniowe przesunięcie daty/godziny, ponieważ ESP32 nie ma wewnętrznego zegara czasu rzeczywistego."},"networkscan":{"NearbyNetworks":"Pobliskie sieci Wi-Fi","SelectNetwork":"Wybierz sieć","Secured":"Zabezpieczona","Open":"Otwarta","Scan":"Skanuj sieci","Refresh":"Odśwież","Scanning":"Skanowanie…","ManualHint":"Wybierz pobliską sieć lub wpisz SSID poniżej, także dla sieci ukrytych. Wybór wypełnia tylko SSID; wpisz hasło i zapisz, aby się połączyć.","ScanningHint":"Wyszukiwanie pobliskich sieci Wi-Fi. Dostęp do OpenDTU może na chwilę zwolnić.","Found":"Znalezione sieci: {count}","NoNetworks":"Nie znaleziono widocznych sieci. Kliknij Odśwież lub wpisz SSID ręcznie poniżej.","Errors":{"wifi_disabled":"Skanowanie Wi-Fi jest niedostępne, gdy aktywny jest Ethernet. Wpisz SSID ręcznie poniżej.","busy":"OpenDTU próbuje się teraz połączyć. Poczekaj na zakończenie lub wstrzymanie próby, a potem kliknij Odśwież.","scan_failed":"Skanowanie Wi-Fi nie powiodło się. Kliknij Odśwież, aby spróbować ponownie, lub wpisz SSID ręcznie poniżej.","timeout":"Skanowanie Wi-Fi nie zakończyło się na czas. W razie potrzeby połącz się ponownie z OpenDTU i kliknij Odśwież.","unavailable":"Nie udało się odczytać wyników skanowania. Sprawdź połączenie z OpenDTU i kliknij Odśwież."}},"networkadmin":{"ShowPassword":"Pokaż hasło","HidePassword":"Ukryj hasło","ApCoexistenceHint":"OpenDTU może łączyć się z domową siecią Wi-Fi i jednocześnie utrzymywać własny punkt dostępowy. Punkt dostępowy daje lokalny dostęp do OpenDTU; nie udostępnia internetu.","ReconnectHint":"Zapisanie ustawień sieci może na chwilę przerwać działanie tej strony. Połącz się ponownie z punktem dostępowym OpenDTU lub domową siecią Wi-Fi i otwórz OpenDTU jeszcze raz. Punkt dostępowy pozostaje dostępny, dopóki połączenie domowe jest niedostępne; po połączeniu obowiązuje poniższy limit czasu.","Saving":"Zapisywanie ustawień sieci…","LoadFailed":"Nie udało się wczytać ustawień sieci. Połącz się ponownie z OpenDTU i kliknij Przeładuj.","SaveUnconfirmed":"Nie udało się potwierdzić zapisu ustawień. Zmiana sieci mogła rozłączyć tę stronę. Połącz się ponownie z OpenDTU i przeładuj ustawienia, aby sprawdzić je przed ponownym zapisem.","NetworkSettings":"Ustawienia sieciowe","WifiConfiguration":"Konfiguracja Wi-Fi","WifiSsid":"WiFi SSID","WifiPassword":"Hasło WiFi","Hostname":"Nazwa hosta","HostnameHint":"<b>Uwaga:</b> tekst <span class=\"font-monospace\">%06X</span> zostanie zastąpiony ostatnimi 6 cyframi identyfikatora chipa ESP32 w formacie szesnastkowym.","EnableDhcp":"Włącz DHCP","StaticIpConfiguration":"Konfiguracja statycznego adresu IP","IpAddress":"Adres IP","Netmask":"Maska sieci","DefaultGateway":"Brama domyślna","Dns":"Serwer DNS {num}","AdminAp":"Konfiguracja Wi-Fi (Admin AccessPoint)","ApTimeout":"Przekroczono limit czasu punktu dostępu","ApTimeoutHint":"Tryb Time AccessPoint pozostanie aktywny. 0=na zawsze","Minutes":"minuty","EnableMdns":"Włącz mDNS","MdnsSettings":"Konfiguracja mDNS","EnableSyslog":"Enable Syslog","SyslogSettings":"Syslog Settings","SyslogHostname":"Syslog Server","SyslogPort":"Port"},"mqttadmin":{"MqttSettings":"Ustawienia MQTT","MqttConfiguration":"Konfiguracja MQTT","EnableMqtt":"Włącz MQTT","EnableHass":"Włącz automatyczne wykrywanie MQTT Home Assistant","MqttBrokerParameter":"Parametry brokera MQTT","Hostname":"Nazwa hosta","HostnameHint":"Nazwa hosta lub adres IP","Port":"Port","ClientId":"Identyfikator klienta","Username":"Nazwa użytkownika","UsernameHint":"Nazwa użytkownika, pozostaw puste dla połączenia anonimowego","Password":"Hasło","PasswordHint":"Hasło, pozostaw puste dla połączenia anonimowego","BaseTopic":"Temat podstawowy","BaseTopicHint":"Baza tematu, przedrostek do dodania (np. falownik/)","PublishInterval":"Interwał publikacji","Seconds":"sekundy","CleanSession":"Włącz czyszczenie sesji","EnableRetain":"Włącz zachowanie","EnableTls":"Włącz TLS","RootCa":"Certyfikat CA-Root (domyślnie Letsencrypt)","TlsCertLoginEnable":"Włącz logowanie przy użyciu certyfikatu TLS","ClientCert":"Certyfikat klienta TLS","ClientKey":"Klucz klienta TLS","LwtParameters":"Parametry LWT","LwtTopic":"Temat LWT","LwtTopicHint":"Temat LWT, do dodania do tematu podstawowego","LwtOnline":"Wiadomość 'Online0 LWT'","LwtOnlineHint":"Wiadomość wysłana w trybie online","LwtOffline":"Wiadomość LWT 'Offline'","LwtOfflineHint":"Wiadomość, która zostanie opublikowana w trybie offline","LwtQos":"QoS (jakość usług)","QOS0":"0 (Maksymalnie raz)","QOS1":"1 (Przynajmniej raz)","QOS2":"2 (dokładnie raz)","HassParameters":"Parametry automatycznego wykrywania Home Assistant MQTT","HassPrefixTopic":"Prefiks tematu","HassPrefixTopicHint":"Prefiks automatycznego wykrywania tematów","HassRetain":"Włącz zachowanie","HassExpire":"Włącz wygaśnięcie","HassIndividual":"Panele indywidualne"},"inverteradmin":{"InverterSettings":"Ustawienia falownika","AddInverter":"Dodaj nowy falownik","Serial":"Serial","Name":"Nazwa","Add":"Dodaj","AddHint":"<b>Uwaga:</b> Możesz dodać dodatkowe parametry po utworzeniu falownika, klikając ikonę 'Ołówek' na liście falowników.","InverterList":"Lista falowników","Status":"Status","Send":"Wyślij","Receive":"Odbierz","StatusHint":"<b>Uwaga:</b> Falownik zasilany jest światłem słonecznym. W nocy falownik będzie wyłączony. Żądania nadal można przesyłać.","Type":"Typ","Action":"Akcja","SaveOrder":"Zapisz zamówienie","DeleteInverter":"Usuń falownik","EditInverter":"Edytuj falownik","General":"Ogólne","String":"Panel","Advanced":"Zaawansowane","InverterSerial":"Serial falownika:","InverterName":"Nazwa falownika:","InverterNameHint":"Możesz podać dowolną nazwę falownika.","InverterStatus":"Odbierz / Wyślij","PollEnable":"Odpytywania inwertera","PollEnableNight":"Zapytanie o falownik w nocy","CommandEnable":"Wyślij polecenia","CommandEnableNight":"Wysyłaj polecenia w nocy","StringName":"Nazwa ciągu {num}:","StringNameHint":"Tutaj możesz podać dowolną nazwę portu falownika lub podłączonego panelu fotowoltaicznego.","StringMaxPower":"Maksymalna moc panelu {num}:","StringMaxPowerHint":"Wprowadź maksymalną moc związaną z panelami fotowoltaicznymi podłączonymi do tego ciągu.","StringYtOffset":"Całkowite przesunięcie energii dla panelu {num}:","StringYtOffsetHint":"To przesunięcie służy do resetowania licznika, jeśli używany jest używany falownik.","InverterHint":"*) Podaj moc W<sub>p</sub> paneli fotowoltaicznych podłączonych do ciągu: zostanie ona wykorzystana do obliczenia napromieniowania.","ReachableThreshold":"Osiągalny próg","ReachableThresholdHint":"Określa liczbę nieudanych żądań, zanim falownik zostanie uznany za nieosiągalny.","FragmentRecovery":"Odzyskiwanie fragmentów","FragmentReplyTimeout":"Czas oczekiwania na odpowiedź fragmentu","FragmentAutomaticTimeout":"Automatycznie (domyślnie dla modelu: {value} ms)","FragmentAutomaticRetries":"Automatycznie (domyślnie dla modelu: {value} ponowień)","FragmentAutomaticUnavailable":"Automatycznie (wartość domyślna modelu niedostępna)","FragmentManual":"Ręcznie","FragmentReplyTimeoutHint":"Czas oczekiwania na odpowiedzi przy żądaniu brakujących fragmentów. Zakres ręczny: 50–5000 ms.","FragmentRetryLimit":"Limit ponowień fragmentów","FragmentRetryLimitHint":"Łączna liczba ponowień dla wszystkich brakujących fragmentów jednej odpowiedzi, nie na fragment. Zakres ręczny: 1–50.","FragmentCurrentTimeout":"Obowiązująca zapisana wartość: {value} ms.","FragmentCurrentRetries":"Obowiązująca zapisana wartość: {value} ponowień.","FragmentCurrentUnavailable":"Obowiązująca zapisana wartość niedostępna.","FragmentSerialChangedHint":"Zapisz nowy numer seryjny i otwórz ponownie to okno, aby wczytać wartości domyślne modelu i wartości obowiązujące.","FragmentRecoveryHint":"Tryb automatyczny używa wartości domyślnych modelu falownika. Większe wartości mogą opóźniać inne falowniki korzystające z tego samego radia. Zmiany, także powrót do trybu automatycznego, obowiązują od następnego zapytania po zapisaniu.","FragmentResetAutomatic":"Przywróć tryb automatyczny","ZeroRuntime":"Zero danych w czasie rzeczywistym","ZeroRuntimeHint":"Zresetuj dane czasu rzeczywistego (z wyjątkiem energii), jeśli falownik stanie się nieosiągalny.","ZeroDay":"Resetuj dane energetyczne o północy","ZeroDayHint":"Dotyczy to sytuacji, gdy falownik jest nieosiągalny. Jeżeli falownik reaguje również w nocy, zostaną pokazane jego wartości. (Reset następuje po ponownym uruchomieniu)","ClearEventlog":"Wyczyść dziennik zdarzeń o północy","Cancel":"@:base.Cancel","Save":"@:base.Save","DeleteMsg":"Czy na pewno chcesz usunąć falownik \"{name}\" o numerze seryjnym {serial}?","Delete":"Usuń","YieldDayCorrection":"Dzienna korekta energii","YieldDayCorrectionHint":"Dodaj tę wartość do dziennej energii, jeśli falownik został ponownie uruchomiony. Ta wartość zostanie zresetowana o północy","YieldTotalContribution":"Wliczaj uzysk do sum instalacji","YieldTotalContributionHint":"Wliczaj dzienny i całkowity uzysk tego falownika do sum instalacji. Jego własne odczyty i sumy mocy pozostają bez zmian."},"fileadmin":{"ConfigManagement":"Zarządzanie konfiguracją","BackupHeader":"Kopia zapasowa: konfiguracja kopii zapasowej plików","Restore":"Przywróć","NoFileSelected":"Nie wybrano pliku","RestoreHeader":"Przywróć: Przywróć plik konfiguracyjny","Back":"Wstecz","UploadSuccess":"Przesłanie pliku powiodło się","RestoreHint":"<b>Uwaga:</b> Ta operacja zastępuje konfigurację zawartą w pliku, a następnie automatycznie uruchamia ponownie OpenDTU w celu zastosowania nowej konfiguracji.","ResetHeader":"Inicjuj: Wykonaj reset do ustawień fabrycznych","FactoryResetButton":"Przywróć domyślną konfigurację fabryczną","ResetHint":"<b>Uwaga:</b> Ta operacja zastępuje konfigurację tą zawartą w pliku, a następnie automatycznie uruchamia ponownie OpenDTU w celu zastosowania nowej konfiguracji","FactoryReset":"Reset do ustawień fabrycznych","ResetMsg":"Czy na pewno chcesz usunąć bieżącą konfigurację i zastosować konfigurację fabryczną?","ResetConfirm":"Reset do ustawień fabrycznych!","Download":"Pobierz","Delete":"Usuń","DeleteMsg":"Jesteś pewien, że chcesz skasować plik: '{name}'? Możesz ręcznie zrestartować urządzenie aby zastosować zmiany!","Name":"Nazwa","Size":"Rozmiar","Action":"Akcja","Cancel":"@:base.Cancel","InvalidJson":"Plik JSON jest nieprawidłowo sformatowany.","InvalidJsonContent":"Plik JSON ma niewłaściwą zawartość."},"login":{"Login":"Zaloguj się","SystemLogin":"Logowanie do systemu","Username":"Nazwa użytkownika","UsernameRequired":"Wprowadź nazwę użytkownika","Password":"Hasło","PasswordRequired":"Wprowadź hasło","LoginButton":"Zaloguj się"},"firmwareupgrade":{"FirmwareUpgrade":"Aktualizacja oprogramowania","Loading":"@:base.Loading","OtaError":"Błąd aktualizacji OTA","Back":"Wstecz","Retry":"Ponów próbę","OtaStatus":"Status OTA","OtaSuccess":"Aktualizacja oprogramowania zakończyła się pomyślnie. Urządzenie uruchomi się automatycznie ponownie. Gdy będzie ponownie dostępne, interfejs zostanie automatycznie załadowany ponownie.","FirmwareUpload":"Prześlij oprogramowanie sprzętowe","UploadProgress":"Przesyłanie w toku"},"about":{"AboutOpendtu":"O OpenDTU","Documentation":"Dokumentacja","DocumentationBody":"Dokumentacja oprogramowania sprzętowego i sprzętu jest dostępna tutaj: <a href=\"https://www.opendtu.solar\" target=\"_blank\">https://www.opendtu.solar</a>","ProjectOrigin":"Pochodzenie projektu","ProjectOriginBody1":"Ten projekt rozpoczął się od <a href=\"https://www.mikrocontroller.net/topic/525778\" target=\"_blank\">tego wątku. (Mikrocontroller.net)</a>","ProjectOriginBody2":"Protokół Hoymiles został odszyfrowany dzięki dobrowolnemu wkładowi wielu programistów. Dzięki tej pracy powstał między innymi OpenDTU. Projekt rozpowszechniany jest na licencji Open Source (<a href=\"https://www.gnu.de/documents/gpl-2.0.de.html\" target=\"_blank\">GNU Powszechna Licencja Publiczna wersja 2</a>).","ProjectOriginBody3":"Oprogramowanie zostało opracowane zgodnie z naszą najlepszą wiedzą i przekonaniem. Jednakże nie ponosimy żadnej odpowiedzialności za nieprawidłowe działanie lub utratę gwarancji na falownik.","ProjectOriginBody4":"OpenDTU jest dostępne za darmo. Jeśli zapłaciłeś za to oprogramowanie, prawdopodobnie zostałeś oszukany. Wersję dla OpenDTU Fusion z obsługą SolarEdge, historią produkcji i językiem polskim przygotował Okty z materiałów dostępnych na <a href=\"https://github.com/tbnobody/OpenDTU\" target=\"_blank\">GitHub</a>.","NewsUpdates":"Nowości i aktualizacje","NewsUpdatesBody":"Nowe aktualizacje są dostępne na Githubie: <a href=\"https://github.com/tbnobody/OpenDTU\" target=\"_blank\">https://github.com/tbnobody/OpenDTU</a>","ErrorReporting":"Raportowanie błędów","ErrorReportingBody":"Prosimy o zgłaszanie wszelkich problemów związanych z korzystaniem z funkcji platformy <a href=\"https://github.com/tbnobody/OpenDTU/issues\" target=\"_blank\">Github</a>","Discussion":"Dyskusje","DiscussionBody":"Możesz rozpocząć z nami dyskusję na <a href=\"https://discord.gg/CmhuZwWZM2\" target=\"_blank\">Discord</a> o <a href=\"https://github.com/tbnobody/OpenDTU/discussions\" target=\"_blank\">Github</a>"},"hints":{"RadioProblem":"Nie można komunikować się z wybranym modułem radiowym. Sprawdź połączenia z radiem.","TimeSync":"Data/godzina nie zostały zsynchronizowane i w tym przypadku nie jest możliwe wykonywanie żądań do falownika. Ten stan jest normalny zaraz po uruchomieniu, jednak po pewnym czasie (> 1 minuty) ta sytuacja może wskazywać na problem z dostępem do serwera NTP.","TimeSyncLink":"Sprawdź ustawienia daty/godziny.","DefaultPassword":"Używasz domyślnego hasła, aby uzyskać dostęp do interfejsu internetowego i do awaryjnego trybu punktu dostępu. Może to prowadzić do zagrożenia bezpieczeństwa.","DefaultPasswordLink":"Zmień hasło.","PinMappingIssue":"Używasz ogólnego obrazu oprogramowania układowego, ale nie przesłano jeszcze pliku z profilami urządzeń (<code>pin_mapping.json</code>) ani nie wybrano zdefiniowanego w nim profilu. Szczegółowe informacje znajdziesz w <a href=\"https://opendtu.solar/firmware/device_profiles/\" target=\"_blank\" class=\"alert-link\">dokumentacji</a>."},"deviceadmin":{"DeviceManager":"Menedżer urządzeń","ParseError":"Błąd analizy w pliku 'pin_mapping.json': {error}","PinAssignment":"Ustawienia połączenia","SelectedProfile":"Wybrany profil","DefaultProfile":"(Ustawienia domyślne)","ProfileHint":"Twoje urządzenie może przestać odpowiadać po wybraniu niezgodnego profilu. W takim przypadku konieczne będzie wyczyszczenie pamięci poprzez połączenie się z interfejsem szeregowym.","Display":"Wyświetlacz","PowerSafe":"Włącz oszczędzanie energii","PowerSafeHint":"Wyłącz wyświetlacz, jeśli falownik nie produkuje.","Screensaver":"Włącz wygaszacz ekranu","ScreensaverHint":"Przesuwa tekst na wyświetlaczu, aby zapobiec uszkodzeniu pikseli. (Przydatne w przypadku wyświetlaczy OLED)","DiagramMode":"Tryb graficzny","off":"Wyłączone","small":"Mały","fullscreen":"Pełny ekran","DiagramDuration":"Czas trwania wykresu","DiagramDurationHint":"Okres pokazany na wykresie.","Seconds":"Sekundy","Contrast":"Kontrast ({contrast})","Rotation":"Obrót","rot0":"Brak rotacji","rot90":"Obrót o 90 stopni","rot180":"Obrót o 180 stopni","rot270":"Obrót o 270 stopni","DisplayLanguage":"Język wyświetlacza","en":"English","de":"Deutsch","fr":"Français","Leds":"Diody LED","EqualBrightness":"Wyrównaj jasność","LedBrightness":"Dioda LED {led}, Jasność ({brightness})"},"pininfo":{"Name":"Nazwa","ValueSelected":"Wybrana","ValueActive":"Aktywna"},"inputserial":{"format_hoymiles":"Format numeru seryjnego Hoymiles","format_converted":"Numer seryjny już przekonwertowany","format_herf_valid":"Format E-Star HERF (zostanie zapisany po konwersji): {serial}","format_herf_invalid":"Format E-Star HERF: Nieprawidłowa suma kontrolna","format_unknown":"Nieznany format"},"loggingadmin":{"LoggingSettings":"Ustawienia logowania","LogLevel":"Poziom logowania","DefaultLevel":"Default log level","Module":"Moduł","Module_CORE":"Rdzeń ESP-IDF","Module_hoymiles":"Komunikacja radiowa Hoymiles","Module_mqtt":"Klient MQTT","Module_network":"Sieć","Module_webapi":"Interfejs API Web","Module_async_ws":"Async WebSockets","Module_async_tcp":"Async TCP","CoreHint":"Ostrzeżenie: zbyt szczegółowy poziom logowania modułu CORE może znacząco obniżyć wydajność i prowadzić do nieprzewidywalnego działania. Poziom logowania należy zmieniać tylko tymczasowo, na potrzeby konkretnej diagnostyki. Domyślne ustawienie „Error” jest wystarczające do normalnej pracy.","log_inherit":"Inherit from default","log_none":"None","log_error":"(E) Error","log_warn":"(W) Warning","log_info":"(I) Info","log_debug":"(D) Debug","log_verbose":"(V) Verbose"}}})FUSIONLANG";
+diff --git a/include/defaults.h b/include/defaults.h
+index f0413de..87a388d 100644
+--- a/include/defaults.h
++++ b/include/defaults.h
+@@ -101,7 +101,7 @@
+ #define DISPLAY_SCREENSAVER true
+ #define DISPLAY_ROTATION 2U
+ #define DISPLAY_CONTRAST 60U
+-#define DISPLAY_LOCALE "en"
++#define DISPLAY_LOCALE "pl"
+ #define DISPLAY_DIAGRAM_DURATION (10UL * 60UL * 60UL)
+ #define DISPLAY_DIAGRAM_MODE 1U
+ 
+diff --git a/lang/pl.lang.json b/lang/pl.lang.json
+index 16a2779..cd904eb 100644
+--- a/lang/pl.lang.json
++++ b/lang/pl.lang.json
+@@ -1,17 +1,18 @@
+ {
+     "meta": {
+         "name": "Polski",
+-        "code": "pl"
++        "code": "pl",
++        "rev": "fusion-1"
+     },
+     "display": {
+-        "date_format": "%d/%m/%Y %H:%M",
++        "date_format": "%d.%m.%Y %H:%M",
+         "offline": "Offline",
+         "power_w": "%.0f W",
+         "power_kw": "%.1f kW",
+         "yield_today_wh": "Dzisiaj: %4.0f Wh",
+         "yield_today_kwh": "Dzisiaj: %.1f kWh",
+-        "yield_total_kwh": "Całkowite: %.1f kWh",
+-        "yield_total_mwh": "Całkowite: %.0f kWh"
++        "yield_total_kwh": "Razem: %.1f kWh",
++        "yield_total_mwh": "Razem: %.0f kWh"
+     },
+     "webapp": {
+         "menu": {
+@@ -90,6 +91,8 @@
+             "4007": "Inwerter zmieniony!",
+             "4008": "Inwerter usunięty!",
+             "4009": "Zamówienie falownika zapisane!",
++            "4011": "Limit czasu odpowiedzi fragmentu musi wynosić 0 (automatycznie) lub być liczbą całkowitą od 50 do 5000 ms!",
++            "4012": "Limit ponowień fragmentów musi wynosić 0 (automatycznie) lub być liczbą całkowitą od 1 do 50!",
+             "5001": "@:apiresponse.2001",
+             "5002": "Ograniczenie musi wynosić od 1 do {max}!",
+             "5003": "Podano nieprawidłowy typ!",
+@@ -135,7 +138,7 @@
+             "10001": "Hasło musi mieć od 8 do {max} znaków!",
+             "10002": "Uwierzytelnienie powiodło się!",
+             "11001": "@:apiresponse.2001",
+-            "11002": "@:apiresponse:5004",
++            "11002": "@:apiresponse.5004",
+             "12001": "Profil musi mieć od 1 do {max} znaków!"
+         },
+         "home": {
+@@ -146,8 +149,8 @@
+             "TurnOnOff": "Włącz / wyłącz falownik",
+             "ShowInverterInfo": "Pokaż informacje o falowniku",
+             "ShowEventlog": "Pokaż dziennik zdarzeń",
+-            "UnreadMessages": "nieprzeczytane wiadomości",
+-            "Loading": "@:base.Ładowanie",
++            "ReportedEventCount": "Licznik zdarzeń zgłoszony przez falownik: {count}",
++            "Loading": "@:base.Loading",
+             "EventLog": "Dziennik zdarzeń",
+             "InverterInfo": "Informacje o falowniku",
+             "LimitSettings": "Ustawienia limitu mocy",
+@@ -181,13 +184,19 @@
+             "StatsResetting": "Resetowanie...",
+             "Rssi": "RSSI ostatniego odebranego pakietu",
+             "RssiHint": "Inwertery HM obsługują tylko wartości RSSI < -64 dBm i > -64 dBm. W tym przypadku pokazane jest -80 dbm i -30 dbm..",
+-            "dBm": "{dbm} dBm"
++            "dBm": "{dbm} dBm",
++            "UnreadMessages": "nieprzeczytane wiadomości"
+         },
+         "eventlog": {
+             "Start": "Start",
+             "Stop": "Koniec",
+             "Id": "Identyfikator",
+-            "Message": "Wiadomość"
++            "Message": "Wiadomość",
++            "ReportedCount": "Licznik zdarzeń zgłoszony przez falownik",
++            "StoredCount": "Szczegóły zdarzeń przechowywane przez OpenDTU",
++            "ReportedCountHint": "Licznik rośnie, gdy falownik zapisze nowe zdarzenie. Nie jest to liczba aktualnie aktywnych błędów.",
++            "DetailsUnavailable": "Nie odebrano jeszcze aktualnych szczegółów zdarzeń. OpenDTU spróbuje ponownie automatycznie.",
++            "DetailsPending": "OpenDTU pobiera aktualne szczegóły zdarzeń."
+         },
+         "devinfo": {
+             "NoInfo": "Informacje niedostępne",
+@@ -204,6 +213,8 @@
+             "HardwarePartNumber": "Numer części sprzętu",
+             "HardwareVersion": "Wersja sprzętu",
+             "SupportsPowerDistributionLogic": "Obsługa funkcji 'Power Distribution Logic'",
++            "RfHardwareVersion": "Wersja sprzętowa modułu radiowego",
++            "RfFirmwareVersion": "Wersja oprogramowania modułu radiowego",
+             "Yes": "@:base.Yes",
+             "No": "@:base.No"
+         },
+@@ -212,8 +223,8 @@
+             "NoInfoLong": "@:devinfo.NoInfoLong",
+             "Name": "Nazwa",
+             "Version": "Wersja",
+-            "Enabled": "@:wifistationinfo.Włączone",
+-            "Disabled": "@:wifistationinfo.Wyłączone",
++            "Enabled": "@:wifistationinfo.Enabled",
++            "Disabled": "@:wifistationinfo.Disabled",
+             "GridprofileSupport": "Wsparcie dla programistów",
+             "GridprofileSupportLong": "Kliknij <a href=\"https://github.com/tbnobody/OpenDTU/wiki/Grid-Profile-Parser\" target=\"_blank\">tutaj</a> aby uzyskać więcej informacji."
+         },
+@@ -297,6 +308,35 @@
+             "NotConfigured": "nie skonfigurowano",
+             "Unknown": "Nieznany"
+         },
++        "networkstatus": {
++            "Title": "Stan sieci na żywo",
++            "Unavailable": "Brak połączenia z OpenDTU. Połącz się ponownie z jego punktem dostępowym lub siecią domową. Stan odświeży się automatycznie; ostatni stan połączenia nie jest już aktualny.",
++            "TargetSsid": "Zapisana sieć Wi-Fi",
++            "ConnectedSsid": "Połączona sieć Wi-Fi",
++            "NextAttempt": "Następna próba połączenia",
++            "RetryIn": "Za {seconds} s",
++            "DisconnectReason": "Ostatnie rozłączenie",
++            "AccessPoint": "Punkt dostępowy OpenDTU",
++            "EthernetConnected": "Ethernet połączony",
++            "EthernetDisconnected": "Ethernet rozłączony",
++            "States": {
++                "not_configured": "Nie skonfigurowano sieci Wi-Fi",
++                "disabled": "Tryb klienta Wi-Fi wyłączony",
++                "paused": "Wstrzymano ponawianie Wi-Fi, aby punkt dostępowy był dostępny",
++                "connecting": "Łączenie z zapisaną siecią Wi-Fi",
++                "waiting_for_ip": "Połączono z Wi-Fi; oczekiwanie na adres IP",
++                "connected": "Wi-Fi połączone"
++            },
++            "Reasons": {
++                "StationLeft": "Urządzenie opuściło sieć",
++                "HandshakeTimeout": "Przekroczono czas uzgadniania; sprawdź hasło i sygnał",
++                "SignalLost": "Utracono sygnał Wi-Fi",
++                "NetworkNotFound": "Nie znaleziono sieci Wi-Fi",
++                "AuthenticationFailed": "Błąd uwierzytelniania; sprawdź hasło Wi-Fi",
++                "AssociationFailed": "Nie udało się połączyć z punktem dostępowym Wi-Fi",
++                "Other": "Rozłączono"
++            }
++        },
+         "networkinfo": {
+             "NetworkInformation": "Informacje o sieci"
+         },
+@@ -391,6 +431,7 @@
+         "inverterchannelinfo": {
+             "String": "Numer panelu {num}",
+             "Phase": "Faza {num}",
++            "ACOutput": "Wyjście AC",
+             "General": "Ogólne"
+         },
+         "invertertotalinfo": {
+@@ -403,6 +444,12 @@
+             "MaxDailyPower": "Max Power",
+             "Voltage": "Napięcie",
+             "Current": "Prąd",
++            "Voltage Ph1-N": "Napięcie L1-N",
++            "Current Ph1": "Prąd L1",
++            "Voltage Ph2-N": "Napięcie L2-N",
++            "Current Ph2": "Prąd L2",
++            "Voltage Ph3-N": "Napięcie L3-N",
++            "Current Ph3": "Prąd L3",
+             "Power DC": "Zasilanie DC",
+             "YieldDay": "Dzienna produkcja energii",
+             "YieldTotal": "Całkowita produkcja energii",
+@@ -412,7 +459,8 @@
+             "PowerFactor": "Współczynnik mocy",
+             "ReactivePower": "Moc bierna",
+             "Efficiency": "Wydajność",
+-            "Irradiation": "Nasłonecznienie"
++            "Irradiation": "Nasłonecznienie",
++            "RawStatus": "Wartość statusu (nierozkodowana)"
+         },
+         "maintenancereboot": {
+             "DeviceReboot": "Ponowne uruchomienie DTU",
+@@ -480,7 +528,34 @@
+             "SynchronizeTime": "Synchronizuj datę/godzinę",
+             "SynchronizeTimeHint": "<b>Uwaga:</b> Możesz użyć ręcznej synchronizacji, aby ustawić datę/godzinę w przypadku, gdy serwer NTP nie jest dostępny. W tym przypadku data/godzina zostanie utracona w przypadku awarii zasilania. Również , przy ręcznej synchronizacji nastąpi stopniowe przesunięcie daty/godziny, ponieważ ESP32 nie ma wewnętrznego zegara czasu rzeczywistego."
+         },
++        "networkscan": {
++            "NearbyNetworks": "Pobliskie sieci Wi-Fi",
++            "SelectNetwork": "Wybierz sieć",
++            "Secured": "Zabezpieczona",
++            "Open": "Otwarta",
++            "Scan": "Skanuj sieci",
++            "Refresh": "Odśwież",
++            "Scanning": "Skanowanie…",
++            "ManualHint": "Wybierz pobliską sieć lub wpisz SSID poniżej, także dla sieci ukrytych. Wybór wypełnia tylko SSID; wpisz hasło i zapisz, aby się połączyć.",
++            "ScanningHint": "Wyszukiwanie pobliskich sieci Wi-Fi. Dostęp do OpenDTU może na chwilę zwolnić.",
++            "Found": "Znalezione sieci: {count}",
++            "NoNetworks": "Nie znaleziono widocznych sieci. Kliknij Odśwież lub wpisz SSID ręcznie poniżej.",
++            "Errors": {
++                "wifi_disabled": "Skanowanie Wi-Fi jest niedostępne, gdy aktywny jest Ethernet. Wpisz SSID ręcznie poniżej.",
++                "busy": "OpenDTU próbuje się teraz połączyć. Poczekaj na zakończenie lub wstrzymanie próby, a potem kliknij Odśwież.",
++                "scan_failed": "Skanowanie Wi-Fi nie powiodło się. Kliknij Odśwież, aby spróbować ponownie, lub wpisz SSID ręcznie poniżej.",
++                "timeout": "Skanowanie Wi-Fi nie zakończyło się na czas. W razie potrzeby połącz się ponownie z OpenDTU i kliknij Odśwież.",
++                "unavailable": "Nie udało się odczytać wyników skanowania. Sprawdź połączenie z OpenDTU i kliknij Odśwież."
++            }
++        },
+         "networkadmin": {
++            "ShowPassword": "Pokaż hasło",
++            "HidePassword": "Ukryj hasło",
++            "ApCoexistenceHint": "OpenDTU może łączyć się z domową siecią Wi-Fi i jednocześnie utrzymywać własny punkt dostępowy. Punkt dostępowy daje lokalny dostęp do OpenDTU; nie udostępnia internetu.",
++            "ReconnectHint": "Zapisanie ustawień sieci może na chwilę przerwać działanie tej strony. Połącz się ponownie z punktem dostępowym OpenDTU lub domową siecią Wi-Fi i otwórz OpenDTU jeszcze raz. Punkt dostępowy pozostaje dostępny, dopóki połączenie domowe jest niedostępne; po połączeniu obowiązuje poniższy limit czasu.",
++            "Saving": "Zapisywanie ustawień sieci…",
++            "LoadFailed": "Nie udało się wczytać ustawień sieci. Połącz się ponownie z OpenDTU i kliknij Przeładuj.",
++            "SaveUnconfirmed": "Nie udało się potwierdzić zapisu ustawień. Zmiana sieci mogła rozłączyć tę stronę. Połącz się ponownie z OpenDTU i przeładuj ustawienia, aby sprawdzić je przed ponownym zapisem.",
+             "NetworkSettings": "Ustawienia sieciowe",
+             "WifiConfiguration": "Konfiguracja Wi-Fi",
+             "WifiSsid": "WiFi SSID",
+@@ -584,6 +659,21 @@
+             "InverterHint": "*) Podaj moc W<sub>p</sub> paneli fotowoltaicznych podłączonych do ciągu: zostanie ona wykorzystana do obliczenia napromieniowania.",
+             "ReachableThreshold": "Osiągalny próg",
+             "ReachableThresholdHint": "Określa liczbę nieudanych żądań, zanim falownik zostanie uznany za nieosiągalny.",
++            "FragmentRecovery": "Odzyskiwanie fragmentów",
++            "FragmentReplyTimeout": "Czas oczekiwania na odpowiedź fragmentu",
++            "FragmentAutomaticTimeout": "Automatycznie (domyślnie dla modelu: {value} ms)",
++            "FragmentAutomaticRetries": "Automatycznie (domyślnie dla modelu: {value} ponowień)",
++            "FragmentAutomaticUnavailable": "Automatycznie (wartość domyślna modelu niedostępna)",
++            "FragmentManual": "Ręcznie",
++            "FragmentReplyTimeoutHint": "Czas oczekiwania na odpowiedzi przy żądaniu brakujących fragmentów. Zakres ręczny: 50–5000 ms.",
++            "FragmentRetryLimit": "Limit ponowień fragmentów",
++            "FragmentRetryLimitHint": "Łączna liczba ponowień dla wszystkich brakujących fragmentów jednej odpowiedzi, nie na fragment. Zakres ręczny: 1–50.",
++            "FragmentCurrentTimeout": "Obowiązująca zapisana wartość: {value} ms.",
++            "FragmentCurrentRetries": "Obowiązująca zapisana wartość: {value} ponowień.",
++            "FragmentCurrentUnavailable": "Obowiązująca zapisana wartość niedostępna.",
++            "FragmentSerialChangedHint": "Zapisz nowy numer seryjny i otwórz ponownie to okno, aby wczytać wartości domyślne modelu i wartości obowiązujące.",
++            "FragmentRecoveryHint": "Tryb automatyczny używa wartości domyślnych modelu falownika. Większe wartości mogą opóźniać inne falowniki korzystające z tego samego radia. Zmiany, także powrót do trybu automatycznego, obowiązują od następnego zapytania po zapisaniu.",
++            "FragmentResetAutomatic": "Przywróć tryb automatyczny",
+             "ZeroRuntime": "Zero danych w czasie rzeczywistym",
+             "ZeroRuntimeHint": "Zresetuj dane czasu rzeczywistego (z wyjątkiem energii), jeśli falownik stanie się nieosiągalny.",
+             "ZeroDay": "Resetuj dane energetyczne o północy",
+@@ -594,7 +684,9 @@
+             "DeleteMsg": "Czy na pewno chcesz usunąć falownik \"{name}\" o numerze seryjnym {serial}?",
+             "Delete": "Usuń",
+             "YieldDayCorrection": "Dzienna korekta energii",
+-            "YieldDayCorrectionHint": "Dodaj tę wartość do dziennej energii, jeśli falownik został ponownie uruchomiony. Ta wartość zostanie zresetowana o północy"
++            "YieldDayCorrectionHint": "Dodaj tę wartość do dziennej energii, jeśli falownik został ponownie uruchomiony. Ta wartość zostanie zresetowana o północy",
++            "YieldTotalContribution": "Wliczaj uzysk do sum instalacji",
++            "YieldTotalContributionHint": "Wliczaj dzienny i całkowity uzysk tego falownika do sum instalacji. Jego własne odczyty i sumy mocy pozostają bez zmian."
+         },
+         "fileadmin": {
+             "ConfigManagement": "Zarządzanie konfiguracją",
+@@ -649,7 +741,7 @@
+             "ProjectOriginBody1": "Ten projekt rozpoczął się od <a href=\"https://www.mikrocontroller.net/topic/525778\" target=\"_blank\">tego wątku. (Mikrocontroller.net)</a>",
+             "ProjectOriginBody2": "Protokół Hoymiles został odszyfrowany dzięki dobrowolnemu wkładowi wielu programistów. Dzięki tej pracy powstał między innymi OpenDTU. Projekt rozpowszechniany jest na licencji Open Source (<a href=\"https://www.gnu.de/documents/gpl-2.0.de.html\" target=\"_blank\">GNU Powszechna Licencja Publiczna wersja 2</a>).",
+             "ProjectOriginBody3": "Oprogramowanie zostało opracowane zgodnie z naszą najlepszą wiedzą i przekonaniem. Jednakże nie ponosimy żadnej odpowiedzialności za nieprawidłowe działanie lub utratę gwarancji na falownik.",
+-            "ProjectOriginBody4": "OpenDTU jest dostępne za darmo. Jeśli zapłaciłeś za to oprogramowanie, prawdopodobnie zostałeś oszukany.",
++            "ProjectOriginBody4": "OpenDTU jest dostępne za darmo. Jeśli zapłaciłeś za to oprogramowanie, prawdopodobnie zostałeś oszukany. Wersję dla OpenDTU Fusion z obsługą SolarEdge, historią produkcji i językiem polskim przygotował Okty z materiałów dostępnych na <a href=\"https://github.com/tbnobody/OpenDTU\" target=\"_blank\">GitHub</a>.",
+             "NewsUpdates": "Nowości i aktualizacje",
+             "NewsUpdatesBody": "Nowe aktualizacje są dostępne na Githubie: <a href=\"https://github.com/tbnobody/OpenDTU\" target=\"_blank\">https://github.com/tbnobody/OpenDTU</a>",
+             "ErrorReporting": "Raportowanie błędów",
+@@ -732,4 +824,4 @@
+             "log_verbose": "(V) Verbose"
+         }
+     }
+-}
++}
+\ No newline at end of file
+diff --git a/src/FusionLang.cpp b/src/FusionLang.cpp
+new file mode 100644
+index 0000000..4af2d92
+--- /dev/null
++++ b/src/FusionLang.cpp
+@@ -0,0 +1,48 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "FusionLang.h"
++#include "LangPackPl.h"
++#include <LittleFS.h>
++#include <esp_log.h>
++
++#undef TAG
++static const char* TAG = "fusionlang";
++static const char* LANG_FILE = "/pl.lang.json";
++
++void FusionLang::install()
++{
++    if (LittleFS.exists(LANG_FILE)) {
++        File f = LittleFS.open(LANG_FILE, "r");
++        char head[128] = { 0 };
++        size_t n = f ? f.readBytes(head, sizeof(head) - 1) : 0;
++        size_t sz = f ? f.size() : 0;
++        if (f) {
++            f.close();
++        }
++        if (n > 0 && strstr(head, "\"rev\":\"" FUSION_LANG_PL_REV "\"") && sz == strlen_P(FUSION_LANG_PL)) {
++            return; // aktualna
++        }
++    }
++
++    const size_t len = strlen_P(FUSION_LANG_PL);
++    if (LittleFS.totalBytes() - LittleFS.usedBytes() < len + 8192) {
++        ESP_LOGW(TAG, "Za malo miejsca na paczke jezykowa");
++        return;
++    }
++    File f = LittleFS.open(LANG_FILE, "w");
++    if (!f) {
++        ESP_LOGE(TAG, "Nie mozna zapisac %s", LANG_FILE);
++        return;
++    }
++    size_t w = 0;
++    const size_t chunk = 1024;
++    while (w < len) {
++        size_t c = (len - w) < chunk ? (len - w) : chunk;
++        const size_t k = f.write(reinterpret_cast<const uint8_t*>(FUSION_LANG_PL) + w, c);
++        if (k == 0) {
++            break;
++        }
++        w += k;
++    }
++    f.close();
++    ESP_LOGI(TAG, "Zainstalowano polska paczke jezykowa (%u B)", static_cast<unsigned>(w));
++}
+diff --git a/src/main.cpp b/src/main.cpp
+index 2ed4697..a9d0ee2 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -10,6 +10,7 @@
+ #include "FusionDisplay.h"
+ #include "PowerLog.h"
+ #include "I18n.h"
++#include "FusionLang.h"
+ #include "InverterSettings.h"
+ #include "Led_Single.h"
+ #include "Logging.h"
+@@ -86,6 +87,7 @@ void setup()
+ 
+     // Read languate pack
+     ESP_LOGI(TAG, "Reading language pack...");
++    FusionLang::install();
+     I18n.init(scheduler);
+ 
+     // Load PinMapping
+-- 
+2.53.0
+

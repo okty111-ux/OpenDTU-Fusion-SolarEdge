@@ -1,0 +1,69 @@
+<main>
+<section>
+  <h3>Połączenie z chmurą Tuya</h3>
+  <div class="vrow"><div class="vst" id="st"><span class="pill">–</span></div><div class="mu" id="stT"></div></div>
+  <div id="err" class="result err" style="display:none"></div>
+  <div class="kv" id="kv"></div>
+</section>
+
+<section>
+  <h3>Ustawienia</h3>
+  <p class="sub">Fusion wysyła moc i energię jako urządzenie TuyaLink. Dane widać w aplikacji Smart Life / Tuya i można ich użyć w scenach i automatyzacjach.</p>
+  <div class="form">
+    <div><label class="chk"><input id="en" type="checkbox"> Wysyłanie włączone</label></div>
+    <div><label for="reg">Centrum danych</label><select id="reg"><option value="eu">Europa Centralna (m1.tuyaeu.com)</option><option value="eu-w">Europa Zachodnia</option><option value="us">USA Zachód</option><option value="us-e">USA Wschód</option><option value="cn">Chiny</option><option value="in">Indie</option></select><div class="hint">dla Polski: Europa Centralna</div></div>
+    <div><label for="did">Device ID</label><input id="did" type="text" maxlength="40" autocomplete="off" spellcheck="false"></div>
+    <div><label for="sec">Device Secret</label><input id="sec" type="password" maxlength="64" autocomplete="new-password"><div class="hint" id="secH">zostaw puste, aby nie zmieniać</div></div>
+    <div><label for="iv">Wysyłaj co [s]</label><input id="iv" type="number" min="10" max="3600"><div class="hint">10–3600, zalecane 60</div></div>
+  </div>
+  <div class="actions"><button onclick="save()">Zapisz i połącz</button><button class="sec" onclick="test()">Wyślij teraz</button></div>
+</section>
+
+<section>
+  <h3>Jak utworzyć urządzenie w Tuya</h3>
+  <ol class="steps">
+    <li>Zaloguj się na <a href="https://platform.tuya.com" target="_blank" rel="noopener">platform.tuya.com</a> → Product → Development → Create → <b>TuyaLink</b> (Standard: Energy / Custom). Protokół: MQTT, dostęp bezpośredni.</li>
+    <li>W zakładce Function Definition (Thing Model) dodaj właściwości (Property, typ <b>Value</b>, tylko odczyt, skala 0):
+      <table class="pt"><thead><tr><th>Kod (identifier)</th><th>Jednostka</th><th>Zakres</th><th>Znaczenie</th></tr></thead><tbody>
+      <tr><td><code>pv_power</code></td><td>W</td><td>0–100000</td><td>produkcja razem</td></tr>
+      <tr><td><code>hoymiles_power</code></td><td>W</td><td>0–100000</td><td>Hoymiles</td></tr>
+      <tr><td><code>solaredge_power</code></td><td>W</td><td>0–100000</td><td>SolarEdge</td></tr>
+      <tr><td><code>grid_power</code></td><td>W</td><td>−100000–100000</td><td>sieć: + eksport, − pobór</td></tr>
+      <tr><td><code>energy_today</code></td><td>Wh</td><td>0–1000000</td><td>energia dziś</td></tr>
+      <tr><td><code>energy_month</code></td><td>kWh</td><td>0–1000000</td><td>energia w miesiącu</td></tr>
+      <tr><td><code>energy_total</code></td><td>kWh</td><td>0–10000000</td><td>energia od początku</td></tr>
+      </tbody></table></li>
+    <li>Device → Add device (Debug / Register) → zapisz <b>Device ID</b> i <b>Device Secret</b> i wpisz je wyżej.</li>
+    <li>Po połączeniu urządzenie zmieni status na Online, a w Device Logs pojawią się raporty co ustalony czas. Właściwości, których nie zdefiniujesz, Tuya odrzuci (kod 2003).</li>
+  </ol>
+  <div class="box">Połączenie jest szyfrowane (MQTT TLS, port 8883). Device Secret jest zapisany tylko w pamięci Fusion i nie jest pokazywany na stronie. Wymagany jest dostęp do internetu i poprawny czas z NTP.</div>
+</section>
+</main>
+<div id="toast" class="toast"></div>
+<script>
+const $=id=>document.getElementById(id);
+function toast(t,ok=true){const e=$('toast');e.textContent=t;e.style.background=ok?'#1f7a45':'#9b2c2c';e.style.display='block';clearTimeout(e._t);e._t=setTimeout(()=>e.style.display='none',3500);}
+async function get(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(r.status);return r.json();}
+async function post(u,obj){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(JSON.stringify(obj||{}))});const j=await r.json().catch(()=>({}));if(!r.ok||j.type==='warning'||j.type==='danger')throw new Error(j.message||r.status);return j;}
+const esc=s=>String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const CODES={0:'OK',1003:'błąd formatu danych',1004:'urządzenie nie istnieje',2002:'brak modelu produktu',2003:'właściwość nie zdefiniowana w modelu',2006:'błąd danych'};
+let filled=false;
+function render(t){
+  const s=!t.enabled?['wyłączone','']:(t.connected?['połączono','ok']:['brak połączenia','err']);
+  $('st').innerHTML=`<span class="pill ${s[1]}">${s[0]}</span>`;$('stT').textContent=t.enabled?t.host+':8883':'';
+  const e=$('err');if(t.enabled&&t.error){e.style.display='';e.textContent=t.error;}else e.style.display='none';
+  let p={};try{p=JSON.parse(t.payload||'{}').data||{};}catch(x){}
+  const v=k=>p[k]?p[k].value:null,W=x=>x==null?'–':x.toLocaleString('pl-PL')+' W';
+  $('kv').innerHTML=[['Wysłane raporty',t.sent],['Potwierdzone',t.acked],['Ostatnia odpowiedź',t.last_code<0?'–':t.last_code+' · '+(CODES[t.last_code]||'błąd')],['Ostatnio przyjęte',t.last_ok>1600000000?new Date(t.last_ok*1000).toLocaleTimeString('pl-PL'):'–'],
+    ['pv_power',W(v('pv_power'))],['grid_power',W(v('grid_power'))],['energy_today',v('energy_today')==null?'–':v('energy_today').toLocaleString('pl-PL')+' Wh'],['energy_total',v('energy_total')==null?'–':v('energy_total').toLocaleString('pl-PL')+' kWh']]
+    .map(([a,b])=>`<div><span>${a}</span><b>${esc(b)}</b></div>`).join('');
+  if(!filled){$('en').checked=t.enabled;$('reg').value=t.region;$('did').value=t.device_id;$('iv').value=t.interval;$('secH').textContent=t.has_secret?'zapisany – zostaw puste, aby nie zmieniać':'wymagany';filled=true;}
+}
+async function load(){try{render(await get('/api/fusion/tuya'));}catch(e){}}
+async function save(){const o={enabled:$('en').checked,region:$('reg').value,device_id:$('did').value.trim(),interval:+$('iv').value||60};if($('sec').value)o.secret=$('sec').value.trim();
+  if(o.enabled&&(!o.device_id))return toast('Podaj Device ID',false);
+  try{await post('/api/fusion/tuya',o);$('sec').value='';filled=false;toast('Zapisano, łączę z Tuya…');setTimeout(load,1500);}catch(e){toast('Błąd: '+e.message,false);}}
+async function test(){try{await post('/api/fusion/tuya/test');toast('Raport w kolejce');setTimeout(load,2500);}catch(e){toast('Błąd: '+e.message,false);}}
+setInterval(()=>{$('now').textContent=new Date().toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'})},1000);
+load();setInterval(load,5000);
+</script>

@@ -1,0 +1,69 @@
+<main>
+<section>
+  <h3>Zainstalowana wersja</h3>
+  <div class="vrow"><div class="vbig" id="cur">v–</div><div><div id="curTag" class="mu"></div><div class="mu" id="curEnv"></div></div><div class="vst" id="st"><span class="pill">–</span></div></div>
+  <div class="actions"><button id="bCheck" onclick="check()">Sprawdź aktualizacje</button><a class="btn sec" id="relLink" href="#" target="_blank" rel="noopener" style="display:none">Strona wydania na GitHubie</a></div>
+  <div id="msg" class="result" style="display:none"></div>
+</section>
+
+<section id="newBox" style="display:none">
+  <h3 id="newTitle">Dostępna nowa wersja</h3>
+  <p class="sub" id="newSub"></p>
+  <div class="notes" id="notes"></div>
+  <div class="prog" id="prog" style="display:none"><div class="bar"><i id="bar"></i></div><div class="mu" id="progT"></div></div>
+  <div class="actions"><button id="bInst" onclick="install()">Zainstaluj</button></div>
+  <div class="box">Fusion pobiera plik firmware prosto z GitHuba, sprawdza sumę SHA-256 z pliku SHA256SUMS.txt i dopiero wtedy przełącza się na nową wersję. Ustawienia, historia i dane na karcie SD zostają. Jeśli pobieranie się przerwie, zostaje obecna wersja.</div>
+</section>
+
+<section>
+  <h3>Źródło aktualizacji</h3>
+  <p class="sub">Repozytorium musi być publiczne. Każde wydanie ma tag z kolejnym numerem (np. <code>fusion-v3</code>) i pliki <code id="asset">fusion-opendtufusionv2.bin</code> oraz <code>SHA256SUMS.txt</code>.</p>
+  <div class="form">
+    <div><label for="repo">Repozytorium GitHub</label><input id="repo" type="text" placeholder="użytkownik/repozytorium" autocomplete="off"><div class="hint">np. okty111-ux/OpenDTU-Fusion-SolarEdge</div></div>
+    <div><label for="pref">Prefiks tagu</label><input id="pref" type="text" maxlength="24"><div class="hint">numer wersji stoi zaraz po prefiksie</div></div>
+    <div><label class="chk"><input id="auto" type="checkbox"> Sprawdzaj codziennie</label><div class="hint">pierwszy raz 2 min po starcie</div></div>
+  </div>
+  <div class="actions"><button onclick="saveCfg()">Zapisz</button></div>
+</section>
+</main>
+<footer>Ostatnie sprawdzenie: <span id="last">–</span></footer>
+<div id="toast" class="toast"></div>
+<script>
+const $=id=>document.getElementById(id);
+function toast(t,ok=true){const e=$('toast');e.textContent=t;e.style.background=ok?'#1f7a45':'#9b2c2c';e.style.display='block';clearTimeout(e._t);e._t=setTimeout(()=>e.style.display='none',3500);}
+async function get(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(r.status);return r.json();}
+async function post(u,obj){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(JSON.stringify(obj||{}))});const j=await r.json().catch(()=>({}));if(!r.ok||j.type==='warning'||j.type==='danger')throw new Error(j.message||r.status);return j;}
+const esc=s=>String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function md(t){return esc(t).split(/\r?\n/).map(l=>{if(/^#{1,4}\s/.test(l))return '<b>'+l.replace(/^#+\s*/,'')+'</b>';if(/^\s*[-*]\s/.test(l))return '• '+l.replace(/^\s*[-*]\s/,'');return l;}).join('<br>').replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/`(.+?)`/g,'<code>$1</code>');}
+const MB=b=>(b/1048576).toFixed(2).replace('.',',')+' MB';
+const ST={idle:['–',''],checking:['sprawdzanie…',''],uptodate:['aktualna','ok'],available:['jest nowsza','warn'],downloading:['pobieranie…','warn'],verifying:['sprawdzanie sumy…','warn'],done:['zainstalowano','ok'],error:['błąd','err']};
+let U=null,cfgLoaded=false,poll=null,waitBoot=false,oldVer=0;
+function render(u){U=u;
+  $('cur').textContent='v'+u.version;$('curTag').textContent='tag '+u.tag+' · zbudowano '+u.built;$('curEnv').textContent='płytka '+u.env;$('asset').textContent=u.asset;
+  const s=ST[u.state]||ST.idle;$('st').innerHTML=`<span class="pill ${s[1]}">${s[0]}</span>`;
+  $('bCheck').disabled=u.busy;
+  const m=$('msg');if(u.message){m.style.display='';m.className='result '+(u.state==='error'?'err':'ok');m.textContent=u.message;}else m.style.display='none';
+  const L=u.latest;
+  if(L&&L.url){$('relLink').style.display='';$('relLink').href=L.url;}
+  if(L&&(u.available||u.state==='downloading'||u.state==='verifying'||u.state==='done')){
+    $('newBox').style.display='';$('newTitle').textContent='Dostępna wersja v'+L.version;
+    $('newSub').textContent=(L.name&&L.name!==L.tag?L.name+' · ':'')+'tag '+L.tag+(L.date?' · '+L.date.split('-').reverse().join('.'):'')+(L.size?' · '+MB(L.size):'');
+    $('notes').innerHTML=L.notes?md(L.notes):'<span class="mu">Brak opisu zmian.</span>';
+    $('bInst').textContent='Zainstaluj v'+L.version;$('bInst').disabled=u.busy||!L.has_sha;
+    if(!L.has_sha)$('bInst').title='Wydanie nie ma pliku SHA256SUMS.txt';
+  }else if(L&&u.state==='uptodate'){$('newBox').style.display='none';}
+  const pr=u.state==='downloading'||u.state==='verifying'||u.state==='done';$('prog').style.display=pr?'':'none';
+  if(pr){const p=u.total?Math.min(100,u.done*100/u.total):0;$('bar').style.width=p.toFixed(1)+'%';$('progT').textContent=u.state==='downloading'?`${MB(u.done)} z ${u.total?MB(u.total):'?'} (${Math.round(p)}%)`:(u.state==='verifying'?'Sprawdzanie sumy SHA-256…':'Zainstalowano. Fusion uruchamia się ponownie…');}
+  $('last').textContent=u.last_check>1600000000?new Date(u.last_check*1000).toLocaleString('pl-PL'):'jeszcze nie sprawdzano';
+  if(!cfgLoaded){$('repo').value=u.repo;$('pref').value=u.prefix;$('auto').checked=u.auto;cfgLoaded=true;}
+  if(u.state==='done'){waitBoot=true;oldVer=u.version;}
+  const busy=u.busy||u.state==='checking'||u.state==='downloading'||u.state==='verifying'||waitBoot;
+  clearInterval(poll);poll=setInterval(load,busy?1000:15000);
+}
+async function load(){try{const u=await get('/api/fusion/update');if(waitBoot&&u.version!==oldVer){waitBoot=false;toast('Działa nowa wersja v'+u.version);}else if(waitBoot&&u.state!=='done'){waitBoot=false;}render(u);}catch(e){if(waitBoot){$('progT').textContent='Fusion uruchamia się ponownie… czekam na połączenie';}}}
+async function check(){try{await post('/api/fusion/update/check');toast('Sprawdzam GitHub…');setTimeout(load,300);}catch(e){toast('Nie udało się: '+e.message,false);}}
+async function install(){if(!U||!U.latest)return;if(!confirm('Zainstalować wersję v'+U.latest.version+'? Fusion uruchomi się ponownie po instalacji.'))return;try{await post('/api/fusion/update/install');setTimeout(load,300);}catch(e){toast('Nie udało się: '+e.message,false);}}
+async function saveCfg(){try{await post('/api/fusion/update/config',{repo:$('repo').value.trim(),prefix:$('pref').value.trim(),auto:$('auto').checked});toast('Zapisano');cfgLoaded=false;load();}catch(e){toast('Błąd: '+e.message,false);}}
+setInterval(()=>{$('now').textContent=new Date().toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'})},1000);
+load();
+</script>

@@ -1,0 +1,742 @@
+From 217dd8600612b525e2a3668f09109d32e8aff40c Mon Sep 17 00:00:00 2001
+From: okty111 <okty111@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 12:23:24 +0000
+Subject: [PATCH 2/7] Add persistent energy history (day/month/year) and
+ /history page
+
+Co-authored-by: Perplexity <noreply@perplexity.ai>
+---
+ include/EnergyHistory.h    |  94 ++++++++++
+ include/HistoryPage.h      | 134 +++++++++++++
+ include/WebApi_solaredge.h |   3 +
+ src/EnergyHistory.cpp      | 374 +++++++++++++++++++++++++++++++++++++
+ src/WebApi_solaredge.cpp   |  41 ++++
+ src/main.cpp               |   4 +
+ 6 files changed, 650 insertions(+)
+ create mode 100644 include/EnergyHistory.h
+ create mode 100644 include/HistoryPage.h
+ create mode 100644 src/EnergyHistory.cpp
+
+diff --git a/include/EnergyHistory.h b/include/EnergyHistory.h
+new file mode 100644
+index 0000000..68726ce
+--- /dev/null
++++ b/include/EnergyHistory.h
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Persistent energy history (daily / monthly / yearly) for
++ * Hoymiles (all enabled inverters) + SolarEdge + SolarEdge meter.
++ *
++ * Daily energy is computed from the lifetime counters stored inside the
++ * inverters (Hoymiles YieldTotal, SolarEdge AC lifetime energy, meter
++ * import/export).  Only small "day start" snapshots and finished records
++ * are written to LittleFS (/history.json), so a power loss never loses
++ * more than the production since the last save (default 10 min) and even
++ * that is counted on the next day instead of being dropped.
++ */
++#pragma once
++
++#include <ArduinoJson.h>
++#include <TaskSchedulerDeclarations.h>
++#include <deque>
++#include <mutex>
++
++#ifndef HISTORY_SAVE_INTERVAL_MIN
++#define HISTORY_SAVE_INTERVAL_MIN 10
++#endif
++#ifndef HISTORY_MAX_DAYS
++#define HISTORY_MAX_DAYS 62
++#endif
++#ifndef HISTORY_MAX_MONTHS
++#define HISTORY_MAX_MONTHS 36
++#endif
++#ifndef HISTORY_MAX_YEARS
++#define HISTORY_MAX_YEARS 25
++#endif
++#ifndef HISTORY_PRODUCING_THRESHOLD_W
++#define HISTORY_PRODUCING_THRESHOLD_W 5.0f
++#endif
++
++// one aggregated period (day, month or year); energies in kWh, -1 = unknown
++struct EnergyRecord {
++    char key[11] = { 0 }; // "YYYY-MM-DD", "YYYY-MM" or "YYYY"
++    float hoy = 0;        // Hoymiles production
++    float se = 0;         // SolarEdge production
++    float exp = -1;       // meter export to grid
++    float imp = -1;       // meter import from grid
++    float hoyPeak = 0;    // W (days only)
++    float sePeak = 0;     // W (days only)
++};
++
++// lifetime counter set
++struct Counters {
++    float hoy = -1; // kWh, -1 = unknown
++    float se = -1;
++    float exp = -1;
++    float imp = -1;
++};
++
++class EnergyHistoryClass {
++public:
++    EnergyHistoryClass();
++    void init(Scheduler& scheduler);
++
++    void toJson(JsonVariant root);
++    void reset();
++
++private:
++    void loop();
++    void mqttPublish();
++    void readLiveCounters(Counters& c, float& hoyW, float& seW);
++    void rollover(const char* newDate);
++    EnergyRecord todayRecord() const;
++    static void addTo(std::deque<EnergyRecord>& list, const char* key, const EnergyRecord& day, size_t max);
++    static float delta(float now, float start);
++
++    bool load();
++    bool save();
++
++    std::mutex _mutex;
++
++    // current day state
++    char _date[11] = { 0 };
++    Counters _start; // counters at beginning of the day
++    Counters _last;  // last valid counters seen
++    float _hoyPeak = 0, _sePeak = 0;
++    char _firstProd[6] = { 0 }, _lastProd[6] = { 0 };
++
++    std::deque<EnergyRecord> _days, _months, _years;
++
++    uint32_t _lastSaveMs = 0;
++    bool _dirty = false;
++    bool _loaded = false;
++
++    Task _loopTask;
++    Task _mqttTask;
++};
++
++extern EnergyHistoryClass EnergyHistory;
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+new file mode 100644
+index 0000000..27b83f0
+--- /dev/null
++++ b/include/HistoryPage.h
+@@ -0,0 +1,134 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Standalone history page served at /history (no chart, tables only)
++#pragma once
++#include <Arduino.h>
++
++static const char HISTORY_PAGE_HTML[] PROGMEM = R"HTMLPAGE(<!DOCTYPE html>
++<html lang="pl">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width,initial-scale=1">
++<title>Fusion – energia</title>
++<style>
++:root{--bg:#f4f6f8;--card:#fff;--tx:#1d2733;--mu:#6b7785;--bd:#e3e7ec;--ok:#1f9d55;--warn:#b7791f;--off:#5a6b7d;--acc:#2b6cb0}
++@media (prefers-color-scheme:dark){:root{--bg:#12161b;--card:#1b2128;--tx:#e6ebf0;--mu:#93a0ae;--bd:#2a323c;--acc:#63a4e8}}
++*{box-sizing:border-box}
++body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx)}
++header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;background:var(--card);border-bottom:1px solid var(--bd)}
++header h1{font-size:18px;margin:0}
++header .t{color:var(--mu);font-size:13px}
++main{max-width:980px;margin:0 auto;padding:16px}
++.banner{display:flex;gap:14px;align-items:flex-start;padding:16px 18px;border-radius:12px;background:var(--card);border:1px solid var(--bd);border-left:5px solid var(--off);margin-bottom:16px}
++.banner.on{border-left-color:var(--ok)}
++.banner h2{margin:0 0 4px;font-size:17px}
++.banner p{margin:2px 0;color:var(--mu)}
++.moon{font-size:26px;line-height:1}
++.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
++@media(max-width:640px){.grid{gap:8px}.card{padding:10px}.card .v{font-size:20px}.card .l{font-size:12px}th,td{padding:6px 5px;font-size:13px}main{padding:10px}}
++.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px}
++.card .l{color:var(--mu);font-size:13px}
++.card .v{font-size:28px;font-weight:600;font-variant-numeric:tabular-nums}
++.card .v.zero{color:var(--mu)}
++.card .s{font-size:13px;color:var(--mu)}
++.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;background:var(--bd);color:var(--tx)}
++.pill.ok{background:#1f9d5522;color:var(--ok)}.pill.warn{background:#b7791f22;color:var(--warn)}
++section{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px;margin-bottom:16px;overflow-x:auto}
++section h3{margin:0 0 10px;font-size:16px}
++table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
++th,td{padding:7px 8px;border-bottom:1px solid var(--bd);text-align:right;white-space:nowrap}
++th:first-child,td:first-child{text-align:left}
++th{color:var(--mu);font-weight:500;font-size:13px}
++tr.sum td{font-weight:600}
++tr.cur td{background:#2b6cb011}
++.mu{color:var(--mu)}
++.sm{display:none}
++@media(max-width:640px){.sm{display:inline}.lg{display:none}}
++footer{color:var(--mu);font-size:12px;text-align:center;padding:8px 0 24px}
++</style>
++</head>
++<body>
++<header><h1>Fusion · energia</h1><div class="t" id="now">–</div></header>
++<main>
++  <div class="banner" id="banner"></div>
++
++  <div class="grid">
++    <div class="card"><div class="l"><span class="lg">Hoymiles MIT-5000-8T</span><span class="sm">Hoymiles</span></div><div class="v" id="hoyW">–</div><div class="s" id="hoyS"></div></div>
++    <div class="card"><div class="l">SolarEdge</div><div class="v" id="seW">–</div><div class="s" id="seS"></div></div>
++    <div class="card"><div class="l">Razem</div><div class="v" id="totW">–</div><div class="s" id="gridS"></div></div>
++  </div>
++
++  <section><h3>Dziś</h3>
++    <table><thead><tr><th>Źródło</th><th>Energia</th><th>Moc szczytowa</th></tr></thead><tbody id="today"></tbody></table>
++  </section>
++
++  <section><h3>Ostatnie dni <span class="mu">[kWh]</span></h3>
++    <table><thead><tr><th>Dzień</th><th><span class="lg">Hoymiles</span><span class="sm">Hoy</span></th><th><span class="lg">SolarEdge</span><span class="sm">SE</span></th><th>Razem</th><th><span class="lg">Eksport</span><span class="sm">Eksp.</span></th><th><span class="lg">Import</span><span class="sm">Imp.</span></th></tr></thead><tbody id="days"></tbody></table>
++  </section>
++
++  <section><h3>Miesiące <span class="mu">[kWh]</span></h3>
++    <table><thead><tr><th>Miesiąc</th><th><span class="lg">Hoymiles</span><span class="sm">Hoy</span></th><th><span class="lg">SolarEdge</span><span class="sm">SE</span></th><th>Razem</th><th><span class="lg">Eksport</span><span class="sm">Eksp.</span></th><th><span class="lg">Import</span><span class="sm">Imp.</span></th></tr></thead><tbody id="months"></tbody></table>
++  </section>
++
++  <section><h3>Lata i liczniki całkowite <span class="mu">[kWh]</span></h3>
++    <table><thead><tr><th>Rok</th><th><span class="lg">Hoymiles</span><span class="sm">Hoy</span></th><th><span class="lg">SolarEdge</span><span class="sm">SE</span></th><th>Razem</th><th><span class="lg">Eksport</span><span class="sm">Eksp.</span></th><th><span class="lg">Import</span><span class="sm">Imp.</span></th></tr></thead><tbody id="years"></tbody></table>
++  </section>
++</main>
++<footer id="foot"></footer>
++<script>
++const $=id=>document.getElementById(id);
++const MON=['styczeń','luty','marzec','kwiecień','maj','czerwiec','lipiec','sierpień','wrzesień','październik','listopad','grudzień'];
++const DOW=['nd','pn','wt','śr','cz','pt','sb'];
++const kwh=v=>(v===undefined||v===null||v<0)?'<span class="mu">–</span>':(+v).toLocaleString('pl-PL',{minimumFractionDigits:2,maximumFractionDigits:2})+' kWh';
++const w=v=>{v=+v||0;return v>=1000?(v/1000).toLocaleString('pl-PL',{maximumFractionDigits:2})+' kW':Math.round(v)+' W'};
++const num=v=>(v===undefined||v===null||v<0)?'<span class="mu">–</span>':(+v).toLocaleString('pl-PL',{minimumFractionDigits:v>=1000?0:2,maximumFractionDigits:v>=1000?0:2});
++const sum=r=>(+r.h||0)+(+r.s||0);
++const row=(label,r,cls='')=>`<tr class="${cls}"><td>${label}</td><td>${num(r.h)}</td><td>${num(r.s)}</td><td>${num(sum(r))}</td><td>${num(r.e)}</td><td>${num(r.i)}</td></tr>`;
++const SE={1:'wyłączony',2:'uśpiony',3:'uruchamianie',4:'produkuje',5:'ograniczony',6:'wyłączanie',7:'błąd',8:'czuwanie'};
++const dayLabel=k=>{const d=new Date(k+'T12:00:00');return `${DOW[d.getDay()]} ${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}`};
++const monLabel=k=>{const [y,m]=k.split('-');return `${MON[+m-1].slice(0,3)} ${y}`};
++
++function render(h){
++  const L=h.live, T=h.today;
++  $('now').textContent=h.time_valid?h.now:'brak synchronizacji czasu (NTP)';
++  const producing=L.total_w>5;
++  const b=$('banner');
++  b.className='banner'+(producing?' on':'');
++  if(producing){
++    b.innerHTML=`<div class="moon">☀</div><div><h2>Trwa produkcja</h2><p>Od ${T.first||'–'} · dziś łącznie ${kwh(sum(T))}</p></div>`;
++  }else{
++    const why=[];
++    why.push(L.hoy_reachable?'Hoymiles: brak mocy':'Hoymiles: brak odpowiedzi (uśpiony)');
++    why.push(L.se_valid?`SolarEdge: ${SE[L.se_status]||L.se_status_text}`:'SolarEdge: brak połączenia Modbus');
++    b.innerHTML=`<div class="moon">☾</div><div><h2>Brak produkcji</h2>
++      <p>${why.join(' · ')}</p>
++      <p>Dziś wyprodukowano ${kwh(sum(T))}${T.first?` (od ${T.first} do ${T.last})`:''}.</p>
++      ${h.sunrise?`<p>Wschód słońca ${h.sunrise} · zachód ${h.sunset}</p>`:''}</div>`;
++  }
++  const setV=(id,v)=>{$(id).textContent=w(v);$(id).className='v'+((+v||0)<1?' zero':'')};
++  setV('hoyW',L.hoy_w); setV('seW',L.se_w); setV('totW',L.total_w);
++  $('hoyS').innerHTML=L.hoy_producing?'<span class="pill ok">produkuje</span>':(L.hoy_reachable?'<span class="pill">osiągalny</span>':'<span class="pill">uśpiony</span>');
++  $('seS').innerHTML=L.se_valid?`<span class="pill ${L.se_status==4?'ok':(L.se_status==7?'warn':'')}">${SE[L.se_status]||L.se_status_text}</span>`:'<span class="pill warn">offline</span>';
++  $('gridS').innerHTML=L.grid_w===undefined?'':(L.grid_w>=0?`sieć: eksport ${w(L.grid_w)}`:`sieć: pobór ${w(-L.grid_w)}`);
++
++  $('today').innerHTML=
++    `<tr><td>Hoymiles</td><td>${kwh(T.h)}</td><td>${w(T.hp)}</td></tr>`+
++    `<tr><td>SolarEdge</td><td>${kwh(T.s)}</td><td>${w(T.sp)}</td></tr>`+
++    `<tr class="sum"><td>Razem</td><td>${kwh(sum(T))}</td><td></td></tr>`+
++    (T.e!==undefined?`<tr><td>Eksport do sieci</td><td>${kwh(T.e)}</td><td></td></tr><tr><td>Pobór z sieci</td><td>${kwh(T.i)}</td><td></td></tr>`:'');
++
++  const days=(h.days||[]).slice().reverse();
++  $('days').innerHTML=row(`dziś ${dayLabel(T.k).slice(3)}`,T,'cur')+(days.length?days.map(r=>row(dayLabel(r.k),r)).join(''):'<tr><td colspan="6" class="mu">Brak zapisanych dni</td></tr>');
++  const months=(h.months||[]).slice().reverse();
++  $('months').innerHTML=months.map((r,i)=>row(monLabel(r.k),r,i===0?'cur':'')).join('')||'<tr><td colspan="6" class="mu">–</td></tr>';
++  const years=(h.years||[]).slice().reverse();
++  $('years').innerHTML=years.map((r,i)=>row(r.k,r,i===0?'cur':'')).join('')+row('Łącznie',h.lifetime||{},'sum');
++  $('foot').textContent=`Odświeżanie co 30 s · zapis do pamięci flash co ${h.save_interval_min} min i o północy`;
++}
++async function load(){
++  try{const r=await fetch('/api/history');if(r.ok)render(await r.json());}catch(e){$('now').textContent='brak połączenia z DTU';}
++}
++load();setInterval(load,30000);
++</script>
++</body>
++</html>
++)HTMLPAGE";
+diff --git a/include/WebApi_solaredge.h b/include/WebApi_solaredge.h
+index 7ad3036..47cd973 100644
+--- a/include/WebApi_solaredge.h
++++ b/include/WebApi_solaredge.h
+@@ -12,4 +12,7 @@ private:
+     void onStatus(AsyncWebServerRequest* request);
+     void onConfigGet(AsyncWebServerRequest* request);
+     void onConfigPost(AsyncWebServerRequest* request);
++    void onHistoryPage(AsyncWebServerRequest* request);
++    void onHistoryGet(AsyncWebServerRequest* request);
++    void onHistoryReset(AsyncWebServerRequest* request);
+ };
+diff --git a/src/EnergyHistory.cpp b/src/EnergyHistory.cpp
+new file mode 100644
+index 0000000..bb95796
+--- /dev/null
++++ b/src/EnergyHistory.cpp
+@@ -0,0 +1,374 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "EnergyHistory.h"
++#include "Configuration.h"
++#include "Datastore.h"
++#include "MqttSettings.h"
++#include "SolarEdge.h"
++#include "SunPosition.h"
++#include <LittleFS.h>
++#include <time.h>
++
++#undef TAG
++static const char* TAG = "history";
++
++#define HISTORY_FILE "/history.json"
++#define HISTORY_TMP "/history.tmp"
++
++EnergyHistoryClass EnergyHistory;
++
++EnergyHistoryClass::EnergyHistoryClass()
++    : _loopTask(10 * TASK_SECOND, TASK_FOREVER, std::bind(&EnergyHistoryClass::loop, this))
++    , _mqttTask(30 * TASK_SECOND, TASK_FOREVER, std::bind(&EnergyHistoryClass::mqttPublish, this))
++{
++}
++
++void EnergyHistoryClass::init(Scheduler& scheduler)
++{
++    _loaded = load();
++    scheduler.addTask(_loopTask);
++    _loopTask.enable();
++    scheduler.addTask(_mqttTask);
++    _mqttTask.enable();
++    ESP_LOGI(TAG, "History %s (%u days, %u months, %u years)", _loaded ? "loaded" : "empty",
++        _days.size(), _months.size(), _years.size());
++}
++
++float EnergyHistoryClass::delta(float now, float start)
++{
++    if (now < 0 || start < 0 || now < start) {
++        return now < 0 || start < 0 ? -1 : 0;
++    }
++    return now - start;
++}
++
++// ------------------------------------------------------------------ live
++void EnergyHistoryClass::readLiveCounters(Counters& c, float& hoyW, float& seW)
++{
++    hoyW = Datastore.getTotalAcPowerEnabled();
++    // Only trust Hoymiles total when every enabled inverter answered,
++    // otherwise (night, reboot) the sum may be 0 or incomplete.
++    const float hoyTotal = Datastore.getTotalAcYieldTotalEnabled();
++    c.hoy = (Datastore.getIsAllEnabledReachable() && hoyTotal > 0) ? hoyTotal : -1;
++
++    const SolarEdgeData d = SolarEdge.getData();
++    seW = d.valid ? d.acPower : 0;
++    c.se = (d.valid && d.energyTotal > 0) ? d.energyTotal / 1000.0f : -1;
++    c.exp = (d.valid && d.meterValid) ? d.meterExported / 1000.0f : -1;
++    c.imp = (d.valid && d.meterValid) ? d.meterImported / 1000.0f : -1;
++}
++
++void EnergyHistoryClass::loop()
++{
++    struct tm t;
++    if (!getLocalTime(&t, 5) || t.tm_year < (2024 - 1900)) {
++        return; // no valid time yet (NTP not synced)
++    }
++    char today[11];
++    strftime(today, sizeof(today), "%Y-%m-%d", &t);
++
++    Counters now;
++    float hoyW, seW;
++    readLiveCounters(now, hoyW, seW);
++
++    std::lock_guard<std::mutex> lock(_mutex);
++
++    if (_date[0] == 0) {
++        strlcpy(_date, today, sizeof(_date));
++        _dirty = true;
++    } else if (strcmp(_date, today) != 0) {
++        rollover(today);
++    }
++
++    // update last-known counters (monotonic) and set missing day-start values
++    auto upd = [&](float& last, float& start, float v) {
++        if (v < 0) return;
++        if (last < 0 || v > last) {
++            last = v;
++            _dirty = true;
++        }
++        if (start < 0) {
++            start = v;
++            _dirty = true;
++        }
++    };
++    upd(_last.hoy, _start.hoy, now.hoy);
++    upd(_last.se, _start.se, now.se);
++    upd(_last.exp, _start.exp, now.exp);
++    upd(_last.imp, _start.imp, now.imp);
++
++    if (hoyW > _hoyPeak) _hoyPeak = hoyW;
++    if (seW > _sePeak) _sePeak = seW;
++
++    if (hoyW + seW > HISTORY_PRODUCING_THRESHOLD_W) {
++        char hm[6];
++        strftime(hm, sizeof(hm), "%H:%M", &t);
++        if (_firstProd[0] == 0) strlcpy(_firstProd, hm, sizeof(_firstProd));
++        strlcpy(_lastProd, hm, sizeof(_lastProd));
++        _dirty = true;
++    }
++
++    if (_dirty && millis() - _lastSaveMs > HISTORY_SAVE_INTERVAL_MIN * 60000UL) {
++        save();
++    }
++}
++
++EnergyRecord EnergyHistoryClass::todayRecord() const
++{
++    EnergyRecord r;
++    strlcpy(r.key, _date, sizeof(r.key));
++    const float h = delta(_last.hoy, _start.hoy);
++    const float s = delta(_last.se, _start.se);
++    r.hoy = h < 0 ? 0 : h;
++    r.se = s < 0 ? 0 : s;
++    r.exp = delta(_last.exp, _start.exp);
++    r.imp = delta(_last.imp, _start.imp);
++    r.hoyPeak = _hoyPeak;
++    r.sePeak = _sePeak;
++    return r;
++}
++
++void EnergyHistoryClass::addTo(std::deque<EnergyRecord>& list, const char* key, const EnergyRecord& day, size_t max)
++{
++    if (list.empty() || strcmp(list.back().key, key) != 0) {
++        EnergyRecord n;
++        strlcpy(n.key, key, sizeof(n.key));
++        list.push_back(n);
++        while (list.size() > max) list.pop_front();
++    }
++    EnergyRecord& r = list.back();
++    r.hoy += day.hoy;
++    r.se += day.se;
++    if (day.exp >= 0) r.exp = (r.exp < 0 ? 0 : r.exp) + day.exp;
++    if (day.imp >= 0) r.imp = (r.imp < 0 ? 0 : r.imp) + day.imp;
++    if (day.hoyPeak > r.hoyPeak) r.hoyPeak = day.hoyPeak;
++    if (day.sePeak > r.sePeak) r.sePeak = day.sePeak;
++}
++
++// close the current day, start a new one (mutex held)
++void EnergyHistoryClass::rollover(const char* newDate)
++{
++    const EnergyRecord day = todayRecord();
++    ESP_LOGI(TAG, "Day %s closed: Hoymiles %.2f kWh, SolarEdge %.2f kWh", day.key, day.hoy, day.se);
++
++    // days list
++    if (_days.empty() || strcmp(_days.back().key, day.key) != 0) {
++        _days.push_back(day);
++        while (_days.size() > HISTORY_MAX_DAYS) _days.pop_front();
++    }
++    char month[8], year[5];
++    strlcpy(month, day.key, sizeof(month));
++    strlcpy(year, day.key, sizeof(year));
++    addTo(_months, month, day, HISTORY_MAX_MONTHS);
++    addTo(_years, year, day, HISTORY_MAX_YEARS);
++
++    // New day starts at the last known counters. If the DTU was switched off,
++    // production during the outage is counted today instead of being lost.
++    strlcpy(_date, newDate, sizeof(_date));
++    _start = _last;
++    _hoyPeak = _sePeak = 0;
++    _firstProd[0] = _lastProd[0] = 0;
++
++    save();
++}
++
++// ------------------------------------------------------------- storage
++static void recToJson(JsonObject o, const EnergyRecord& r, bool peaks)
++{
++    o["k"] = r.key;
++    o["h"] = serialized(String(r.hoy, 3));
++    o["s"] = serialized(String(r.se, 3));
++    if (r.exp >= 0) o["e"] = serialized(String(r.exp, 3));
++    if (r.imp >= 0) o["i"] = serialized(String(r.imp, 3));
++    if (peaks) {
++        o["hp"] = (int)r.hoyPeak;
++        o["sp"] = (int)r.sePeak;
++    }
++}
++
++static EnergyRecord recFromJson(JsonObjectConst o)
++{
++    EnergyRecord r;
++    strlcpy(r.key, o["k"] | "", sizeof(r.key));
++    r.hoy = o["h"] | 0.0f;
++    r.se = o["s"] | 0.0f;
++    r.exp = o["e"] | -1.0f;
++    r.imp = o["i"] | -1.0f;
++    r.hoyPeak = o["hp"] | 0.0f;
++    r.sePeak = o["sp"] | 0.0f;
++    return r;
++}
++
++bool EnergyHistoryClass::save()
++{
++    JsonDocument doc;
++    doc["v"] = 1;
++    auto cur = doc["cur"].to<JsonObject>();
++    cur["date"] = _date;
++    auto putC = [](JsonObject o, const Counters& c) {
++        o["h"] = serialized(String(c.hoy, 3));
++        o["s"] = serialized(String(c.se, 3));
++        o["e"] = serialized(String(c.exp, 3));
++        o["i"] = serialized(String(c.imp, 3));
++    };
++    putC(cur["start"].to<JsonObject>(), _start);
++    putC(cur["last"].to<JsonObject>(), _last);
++    cur["hp"] = (int)_hoyPeak;
++    cur["sp"] = (int)_sePeak;
++    cur["fp"] = _firstProd;
++    cur["lp"] = _lastProd;
++
++    for (auto& r : _days) recToJson(doc["days"].add<JsonObject>(), r, true);
++    for (auto& r : _months) recToJson(doc["months"].add<JsonObject>(), r, false);
++    for (auto& r : _years) recToJson(doc["years"].add<JsonObject>(), r, false);
++
++    // write to temp file first, then rename -> no corrupted history on power loss
++    File f = LittleFS.open(HISTORY_TMP, "w");
++    if (!f) {
++        ESP_LOGE(TAG, "Cannot open %s", HISTORY_TMP);
++        return false;
++    }
++    const size_t n = serializeJson(doc, f);
++    f.close();
++    if (n == 0) {
++        LittleFS.remove(HISTORY_TMP);
++        return false;
++    }
++    LittleFS.remove(HISTORY_FILE);
++    const bool ok = LittleFS.rename(HISTORY_TMP, HISTORY_FILE);
++    _lastSaveMs = millis();
++    _dirty = false;
++    ESP_LOGD(TAG, "History saved (%u bytes)", n);
++    return ok;
++}
++
++bool EnergyHistoryClass::load()
++{
++    const char* file = LittleFS.exists(HISTORY_FILE) ? HISTORY_FILE : (LittleFS.exists(HISTORY_TMP) ? HISTORY_TMP : nullptr);
++    if (!file) return false;
++    File f = LittleFS.open(file, "r", false);
++    if (!f) return false;
++    JsonDocument doc;
++    const auto err = deserializeJson(doc, f);
++    f.close();
++    if (err) {
++        ESP_LOGW(TAG, "History file invalid: %s", err.c_str());
++        return false;
++    }
++    std::lock_guard<std::mutex> lock(_mutex);
++    JsonObjectConst cur = doc["cur"];
++    strlcpy(_date, cur["date"] | "", sizeof(_date));
++    auto getC = [](JsonObjectConst o, Counters& c) {
++        c.hoy = o["h"] | -1.0f;
++        c.se = o["s"] | -1.0f;
++        c.exp = o["e"] | -1.0f;
++        c.imp = o["i"] | -1.0f;
++    };
++    getC(cur["start"], _start);
++    getC(cur["last"], _last);
++    _hoyPeak = cur["hp"] | 0.0f;
++    _sePeak = cur["sp"] | 0.0f;
++    strlcpy(_firstProd, cur["fp"] | "", sizeof(_firstProd));
++    strlcpy(_lastProd, cur["lp"] | "", sizeof(_lastProd));
++    for (JsonObjectConst o : doc["days"].as<JsonArrayConst>()) _days.push_back(recFromJson(o));
++    for (JsonObjectConst o : doc["months"].as<JsonArrayConst>()) _months.push_back(recFromJson(o));
++    for (JsonObjectConst o : doc["years"].as<JsonArrayConst>()) _years.push_back(recFromJson(o));
++    return true;
++}
++
++void EnergyHistoryClass::reset()
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    _days.clear();
++    _months.clear();
++    _years.clear();
++    _start = _last;
++    _hoyPeak = _sePeak = 0;
++    _firstProd[0] = _lastProd[0] = 0;
++    save();
++}
++
++// ------------------------------------------------------------------ API
++void EnergyHistoryClass::toJson(JsonVariant root)
++{
++    struct tm t;
++    const bool timeValid = getLocalTime(&t, 5) && t.tm_year >= (2024 - 1900);
++    char buf[20];
++    if (timeValid) {
++        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &t);
++        root["now"] = buf;
++    }
++    root["time_valid"] = timeValid;
++
++    struct tm s;
++    if (SunPosition.sunriseTime(&s)) {
++        strftime(buf, sizeof(buf), "%H:%M", &s);
++        root["sunrise"] = buf;
++    }
++    if (SunPosition.sunsetTime(&s)) {
++        strftime(buf, sizeof(buf), "%H:%M", &s);
++        root["sunset"] = buf;
++    }
++    root["is_day"] = SunPosition.isDayPeriod();
++
++    // live
++    Counters c;
++    float hoyW, seW;
++    readLiveCounters(c, hoyW, seW);
++    const SolarEdgeData d = SolarEdge.getData();
++    auto live = root["live"].to<JsonObject>();
++    live["hoy_w"] = hoyW;
++    live["se_w"] = seW;
++    live["total_w"] = hoyW + seW;
++    live["hoy_reachable"] = Datastore.getIsAtLeastOneReachable();
++    live["hoy_producing"] = Datastore.getIsAtLeastOneProducing();
++    live["se_valid"] = d.valid;
++    live["se_status"] = d.status;
++    live["se_status_text"] = SolarEdgeClass::statusToString(d.status);
++    if (d.meterValid) live["grid_w"] = d.meterPower;
++
++    std::lock_guard<std::mutex> lock(_mutex);
++    const EnergyRecord today = todayRecord();
++    auto td = root["today"].to<JsonObject>();
++    recToJson(td, today, true);
++    td["first"] = _firstProd;
++    td["last"] = _lastProd;
++
++    for (auto& r : _days) recToJson(root["days"].add<JsonObject>(), r, true);
++
++    // months/years including today's running values
++    auto withToday = [&](const std::deque<EnergyRecord>& src, const char* key, size_t max, const char* name) {
++        std::deque<EnergyRecord> tmp = src;
++        if (_date[0]) addTo(tmp, key, today, max);
++        for (auto& r : tmp) recToJson(root[name].add<JsonObject>(), r, false);
++    };
++    char month[8], year[5];
++    strlcpy(month, _date, sizeof(month));
++    strlcpy(year, _date, sizeof(year));
++    withToday(_months, month, HISTORY_MAX_MONTHS, "months");
++    withToday(_years, year, HISTORY_MAX_YEARS, "years");
++
++    auto lt = root["lifetime"].to<JsonObject>();
++    if (_last.hoy >= 0) lt["h"] = _last.hoy;
++    if (_last.se >= 0) lt["s"] = _last.se;
++    if (_last.exp >= 0) lt["e"] = _last.exp;
++    if (_last.imp >= 0) lt["i"] = _last.imp;
++
++    root["save_interval_min"] = HISTORY_SAVE_INTERVAL_MIN;
++}
++
++void EnergyHistoryClass::mqttPublish()
++{
++    _mqttTask.setInterval(Configuration.get().Mqtt.PublishInterval * TASK_SECOND);
++    if (!MqttSettings.getConnected() || _date[0] == 0) return;
++
++    EnergyRecord t;
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        t = todayRecord();
++    }
++    MqttSettings.publish("fusion/day/hoymiles", String(t.hoy, 3));
++    MqttSettings.publish("fusion/day/solaredge", String(t.se, 3));
++    MqttSettings.publish("fusion/day/total", String(t.hoy + t.se, 3));
++    if (t.exp >= 0) MqttSettings.publish("fusion/day/exported", String(t.exp, 3));
++    if (t.imp >= 0) MqttSettings.publish("fusion/day/imported", String(t.imp, 3));
++}
+diff --git a/src/WebApi_solaredge.cpp b/src/WebApi_solaredge.cpp
+index c2a5ddf..8d6b6b3 100644
+--- a/src/WebApi_solaredge.cpp
++++ b/src/WebApi_solaredge.cpp
+@@ -4,9 +4,14 @@
+  *   GET  /api/solaredge/status   live values
+  *   GET  /api/solaredge/config   current settings
+  *   POST /api/solaredge/config   data={"host":"192.168.1.50","port":1502,...}
++ *   GET  /history                history page (tables)
++ *   GET  /api/history            stored daily/monthly/yearly energy
++ *   POST /api/history/reset      clear stored history (admin)
+  */
+ #include "WebApi_solaredge.h"
+ #include "Datastore.h"
++#include "EnergyHistory.h"
++#include "HistoryPage.h"
+ #include "SolarEdge.h"
+ #include "WebApi.h"
+ #include "WebApi_errors.h"
+@@ -17,6 +22,9 @@ void WebApiSolarEdgeClass::init(AsyncWebServer& server, Scheduler& scheduler)
+     using std::placeholders::_1;
+     server.on("/api/solaredge/status", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onStatus, this, _1)));
+     server.on("/api/solaredge/config", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onConfigGet, this, _1)));
++    server.on("/history", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onHistoryPage, this, _1)));
++    server.on("/api/history/reset", HTTP_POST, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onHistoryReset, this, _1)));
++    server.on("/api/history", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onHistoryGet, this, _1)));
+     server.on("/api/solaredge/config", HTTP_POST, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onConfigPost, this, _1)));
+ }
+ 
+@@ -131,3 +139,36 @@ void WebApiSolarEdgeClass::onConfigPost(AsyncWebServerRequest* request)
+     retMsg["code"] = ok ? WebApiError::GenericSuccess : WebApiError::GenericWriteFailed;
+     WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
+ }
++
++void WebApiSolarEdgeClass::onHistoryPage(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentialsReadonly(request)) {
++        return;
++    }
++    request->send(200, "text/html; charset=utf-8", HISTORY_PAGE_HTML);
++}
++
++void WebApiSolarEdgeClass::onHistoryGet(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentialsReadonly(request)) {
++        return;
++    }
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    auto root = response->getRoot();
++    EnergyHistory.toJson(root);
++    WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++}
++
++void WebApiSolarEdgeClass::onHistoryReset(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentials(request)) {
++        return;
++    }
++    EnergyHistory.reset();
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    auto& retMsg = response->getRoot();
++    retMsg["type"] = "success";
++    retMsg["message"] = "History cleared";
++    retMsg["code"] = WebApiError::GenericSuccess;
++    WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++}
+diff --git a/src/main.cpp b/src/main.cpp
+index 0c99459..75cff68 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -5,6 +5,7 @@
+ #include "Configuration.h"
+ #include "Datastore.h"
+ #include "Display_Graphic.h"
++#include "EnergyHistory.h"
+ #include "I18n.h"
+ #include "InverterSettings.h"
+ #include "Led_Single.h"
+@@ -133,6 +134,9 @@ void setup()
+     ESP_LOGI(TAG, "Initializing SolarEdge...");
+     SolarEdge.init(scheduler);
+ 
++    // Persistent daily/monthly/yearly energy history
++    EnergyHistory.init(scheduler);
++
+     ESP_LOGI(TAG, "Startup complete");
+ }
+ 
+-- 
+2.53.0
+

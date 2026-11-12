@@ -1,0 +1,43 @@
+<main>
+<section><h3>Stan karty</h3><p class="sub" id="st">–</p>
+  <div class="actions" id="quick"></div></section>
+<section><h3 id="crumb">/fusion</h3>
+  <table><thead><tr><th>Nazwa</th><th>Rozmiar</th><th></th></tr></thead><tbody id="list"></tbody></table>
+  <div class="box">Pliki CSV: separator „;”, przecinek dziesiętny, kodowanie UTF-8 — otwierają się bezpośrednio w polskim Excelu i LibreOffice. Jeden plik na dzień (odczyt co kilka minut) oraz <b>dni.csv</b> z podsumowaniem każdego dnia.</div>
+</section>
+</main>
+<div id="toast"></div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const size=b=>b<1024?b+' B':b<1048576?(b/1024).toLocaleString('pl-PL',{maximumFractionDigits:1})+' KB':(b/1048576).toLocaleString('pl-PL',{maximumFractionDigits:1})+' MB';
+const dl=p=>'/api/sd/download?path='+encodeURIComponent(p);
+let cur=new URLSearchParams(location.search).get('dir')||'/fusion';
+function toast(t,ok=true){const e=$('toast');e.textContent=t;e.style.background=ok?'#1f7a45':'#9b2c2c';e.style.display='block';setTimeout(()=>e.style.display='none',3000);}
+async function status(){
+  const s=await (await fetch('/api/sd/status')).json();
+  if(!s.available){$('st').innerHTML=`<span class="pill warn">błąd</span> ${esc(s.reason)}`;return false;}
+  if(!s.mounted){$('st').innerHTML=`<span class="pill warn">brak karty</span> ${esc(s.reason)}<br>Podłączenie (SDMMC 1-bit): CLK→GPIO14, CMD→GPIO2, D0→GPIO1, CS/D3 przez 10 kΩ do 3V3, VCC→3V3, GND. Karta FAT32.`;return false;}
+  $('st').innerHTML=`<span class="pill ok">karta ${esc(s.card_type)}</span> zajęte ${s.used_mb} MB z ${(s.total_mb/1024).toLocaleString('pl-PL',{maximumFractionDigits:1})} GB · zapis co ${s.interval} min · ostatni ${esc(s.last_write||'–')}`+(s.write_errors?` · <span class="pill err">błędy zapisu: ${s.write_errors}</span>`:'');
+  const d=new Date();const day=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  $('quick').innerHTML=`<a class="btn" href="${dl('/fusion/'+day.slice(0,4)+'/'+day+'.csv')}">Pobierz dzisiejszy plik</a><a class="btn sec" href="${dl('/fusion/dni.csv')}">Pobierz podsumowanie dni</a>`;
+  return true;
+}
+async function list(){
+  const parts=cur.split('/').filter(Boolean);let acc='';
+  $('crumb').innerHTML=parts.map((p,i)=>{acc+='/'+p;return i<parts.length-1?`<a href="?dir=${encodeURIComponent(acc)}" onclick="go('${acc}');return false">${esc(p)}</a>`:esc(p)}).join(' / ');
+  const j=await (await fetch('/api/sd/list?dir='+encodeURIComponent(cur))).json();
+  if(j.error){$('list').innerHTML=`<tr><td colspan="3" class="mu">${esc(j.error)}</td></tr>`;return;}
+  let rows=[];
+  if(cur!=='/fusion'){const up=cur.substring(0,cur.lastIndexOf('/'))||'/fusion';rows.push(`<tr><td><a href="#" onclick="go('${up}');return false">↑ ..</a></td><td></td><td></td></tr>`);}
+  for(const e of j.entries){const p=cur+'/'+e.name;
+    rows.push(e.dir?`<tr><td><a href="#" onclick="go('${p}');return false">📁 ${esc(e.name)}</a></td><td class="mu">folder</td><td><button class="del" onclick="del('${p}')">Usuń</button></td></tr>`
+                   :`<tr><td><a href="${dl(p)}">${esc(e.name)}</a></td><td>${size(e.size)}</td><td><a class="btn sec" style="padding:4px 10px;font-size:13px" href="${dl(p)}">Pobierz</a> <button class="del" onclick="del('${p}')">Usuń</button></td></tr>`);}
+  $('list').innerHTML=rows.join('')||'<tr><td colspan="3" class="mu">Folder jest pusty</td></tr>';
+}
+function go(d){cur=d;history.replaceState(null,'','?dir='+encodeURIComponent(d));list();}
+async function del(p){if(!confirm('Usunąć '+p+'?'))return;
+  const r=await fetch('/api/sd/delete',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(JSON.stringify({path:p}))});
+  const j=await r.json().catch(()=>({}));toast(j.type==='success'?'Usunięto':(j.message||'Brak uprawnień (zaloguj się jako admin)'),j.type==='success');list();status();}
+status().then(ok=>{if(ok)list();});
+</script>
