@@ -36,7 +36,7 @@ jobs:
         run: cd odtu && git -c user.name=ci -c user.email=ci@localhost am ../patches/*.patch
       - name: Kompilacja
         run: |
-          pip install -U platformio
+          pip install -U platformio intelhex
           cd odtu
           PLATFORMIO_BUILD_FLAGS="-DFUSION_VERSION=$V" pio run -e opendtufusionv2 -e opendtufusionv2_poe
       - name: Pliki wydania
