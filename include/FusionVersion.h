@@ -4,7 +4,7 @@
 #pragma once
 
 #ifndef FUSION_VERSION
-#define FUSION_VERSION 2
+#define FUSION_VERSION 3
 #endif
 #ifndef FUSION_TAG_PREFIX
 #define FUSION_TAG_PREFIX "fusion-v"

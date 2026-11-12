@@ -212,3 +212,9 @@ Uwaga: w szeregu prąd jest ograniczony przez słabszy panel, a suma Voc przy mr
 
 Przygotował Okty z materiałów dostępnych na GitHub (OpenDTU — tbnobody, gałąź MIT-5000-8T — smoe,
 dokumentacja OpenDTU Fusion — markusdd). Licencja GPL-2.0-or-later, jak OpenDTU.
+
+## Strona startowa (od fusion-v3)
+
+Po wpisaniu adresu Fusion (np. `http://192.168.0.222`) od razu otwiera się pulpit Fusion (`/history`) z menu po lewej.
+Klasyczny widok OpenDTU jest pod `http://<IP_FUSION>/?opendtu` oraz w menu: Urządzenie → OpenDTU.
+W wersji fusion-v2 strona startowa była jeszcze klasyczna, a pulpit trzeba było otworzyć ręcznie pod `/history`.

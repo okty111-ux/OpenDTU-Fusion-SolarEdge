@@ -13,7 +13,7 @@ I={
 }
 def ic(k): return f'<svg viewBox="0 0 24 24" aria-hidden="true">{I[k]}</svg>'
 MENU=[('Instalacja',[('/history','home','Pulpit'),('/history#wykres','chart','Wykresy'),('/history#mppt','panel','Inwertery i panele'),('/history#tabele','table','Historia')]),
-      ('Urządzenie',[('/sd','sd','Karta SD'),('/fusion/settings','set','Ustawienia'),('/fusion/tuya','cloud','Chmura Tuya'),('/fusion/update','upd','Aktualizacja z GitHuba'),('/','dtu','OpenDTU')])]
+      ('Urządzenie',[('/sd','sd','Karta SD'),('/fusion/settings','set','Ustawienia'),('/fusion/tuya','cloud','Chmura Tuya'),('/fusion/update','upd','Aktualizacja z GitHuba'),('/?opendtu','dtu','OpenDTU')])]
 def shell(title,body):
     nav=''.join(f'<div class="grp">{g}</div>'+''.join(f'<a class="it" href="{h}">{ic(k)}<span>{t}</span></a>' for h,k,t in items) for g,items in MENU)
     side=('<aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div>'
