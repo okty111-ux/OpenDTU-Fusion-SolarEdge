@@ -4,8 +4,7 @@ Firmware dla płytki OpenDTU Fusion v2: odczyt Hoymiles MIT-5000-8T (radio 868 M
 pulpit w stylu aplikacji, historia produkcji, wykresy z przybliżaniem, karta microSD, wyświetlacz SSD1322,
 język polski, wysyłanie do chmury Tuya i **aktualizacja z GitHuba**.
 
-Wersja eksperymentalna — kompilowana i sprawdzana automatycznie, nie testowana na fizycznym sprzęcie.
-
+Wersja eksperymentalna — kompilowana i sprawdzana  działa
 ## Pobieranie
 
 Najnowsza wersja: [Releases](../../releases/latest). Każde wydanie `fusion-vN` zawiera:
