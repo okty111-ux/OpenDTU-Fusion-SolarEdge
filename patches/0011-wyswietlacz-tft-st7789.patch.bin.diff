@@ -1,0 +1,1430 @@
+From 12af9fb27bb296fe68bb1c04fed445dbc19f1c2b Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 14:30:24 +0100
+Subject: [PATCH] Fusion: colour TFT ST7789 320x240 with EC11 rotary encoder,
+ display type selectable
+
+- new colour page renderer (FusionTftPages) with the same 8 pages as the OLED
+- ST7789 driver on the existing display header pins (software SPI), only
+  changed 16x16 blocks are sent, in small portions so the radios keep running
+- EC11 encoder on free GPIOs (interrupts): turn = next/previous page,
+  push = like the BOOT button; optional backlight pin with brightness
+- settings page: display type, colour inversion, BGR, pins
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/FusionDisplay.h  |  34 ++-
+ include/FusionPages.h    |  37 ++-
+ include/FusionTftPages.h |  46 +++
+ src/FusionDisplay.cpp    | 397 +++++++++++++++++++++++---
+ src/FusionTftPages.cpp   | 603 +++++++++++++++++++++++++++++++++++++++
+ src/WebApi_sd.cpp        |  30 ++
+ 6 files changed, 1105 insertions(+), 42 deletions(-)
+ create mode 100644 include/FusionTftPages.h
+ create mode 100644 src/FusionTftPages.cpp
+
+diff --git a/include/FusionDisplay.h b/include/FusionDisplay.h
+index 9619f9aa..5f7ab9d9 100644
+--- a/include/FusionDisplay.h
++++ b/include/FusionDisplay.h
+@@ -1,8 +1,11 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ /*
+- * SSD1322 256x64 OLED with several pages, switched with a push button.
++ * Display with several pages, switched with a push button or a rotary encoder:
++ *   type 0: SSD1322 256x64 OLED (monochrome)
++ *   type 1: ST7789 320x240 colour TFT (2.4"), optional EC11 rotary encoder
+  *
+- * Wiring (Fusion v2 SPI display header, display in 4-wire SPI mode):
++ * Wiring (Fusion v2 SPI display header, display in 4-wire SPI mode,
++ * the TFT uses the same pins: SDA=DIN, SCL=SCLK):
+  *   DIN/SDA GPIO9, SCLK GPIO10, CS GPIO11, DC GPIO12, RES GPIO13, VCC 3V3, GND
+  * Button: on-board BOOT button (GPIO0) or an external push button GPIO0 -> GND.
+  *   short press  = next page (and wake the screen)
+@@ -40,8 +43,18 @@ struct FdData;
+ #define FD_PIN_BUTTON 0
+ #endif
+ 
++enum FusionDisplayType : uint8_t {
++    FD_TYPE_SSD1322 = 0,
++    FD_TYPE_ST7789 = 1,
++};
++
+ struct FusionDisplayConfig {
+     bool enabled = false;
++    uint8_t type = FD_TYPE_SSD1322;
++    bool tftInvert = true;  // most ST7789 IPS panels need colour inversion
++    bool tftBgr = false;    // red and blue swapped
++    int8_t blPin = -1;      // TFT backlight pin (PWM brightness), -1 = wired to 3V3
++    int8_t encA = -1, encB = -1, encSw = -1; // EC11 rotary encoder, -1 = not connected
+     uint16_t autoSec = 10;  // 0 = no automatic switching
+     uint16_t sleepMin = 10; // screen off at night after N min without button, 0 = never
+     uint8_t contrast = 160; // 0..255
+@@ -57,6 +70,7 @@ public:
+     bool setConfig(const FusionDisplayConfig& c);
+     void toJson(JsonObject root);
+     void nextPage(); // also from the web UI
++    static bool pinAllowed(int pin); // free GPIO for encoder / backlight
+ 
+ private:
+     void loop();
+@@ -67,12 +81,28 @@ private:
+     void loadConfig();
+     bool saveConfig();
+     uint8_t nextAvailable(const FdData& d, uint8_t from);
++    uint8_t prevAvailable(const FdData& d, uint8_t from);
++    void setPower(bool on);
++    void setBrightness(uint8_t v);
++    bool tftBegin();
++    void tftPump(uint16_t budget);
++    void tftMarkDirty();
++    void encoderSetup();
++    int encoderSteps();
+ 
+     std::mutex _mutex;
+     FusionDisplayConfig _cfg;
+     Task _loopTask;
+     void* _u8g2 = nullptr; // u8g2_t*
+     bool _started = false;
++    uint8_t _type = FD_TYPE_SSD1322; // type the hardware was started with
++    uint8_t* _fb = nullptr;          // TFT 8 bit indexed frame buffer
++    uint32_t _blockHash[300] = {};   // 20 x 15 blocks of 16x16 pixels
++    bool _hashValid = false;
++    uint8_t _dirty[300] = {};
++    uint16_t _sendPos = 300;         // >= 300 = nothing to send
++    bool _forceRedraw = false;
++    int8_t _encPins[3] = { -1, -1, -1 };
+     bool _sleeping = false;
+     bool _autoOn = true;
+     uint8_t _page = 0;
+diff --git a/include/FusionPages.h b/include/FusionPages.h
+index 489b6aed..3afb3829 100644
+--- a/include/FusionPages.h
++++ b/include/FusionPages.h
+@@ -305,18 +305,30 @@ table.pt th,table.pt td{text-align:left;white-space:normal}table.pt td:nth-child
+ </section>
+ 
+ <section>
+-  <h3>Wyświetlacz OLED SSD1322 (256×64)</h3>
+-  <p class="sub">Strony przełączasz przyciskiem BOOT (GPIO0): krótkie naciśnięcie – następna strona, przytrzymanie 1 s – automatyczne przełączanie wł./wył.</p>
++  <h3>Wyświetlacz</h3>
++  <p class="sub">Strony przełączasz przyciskiem BOOT (GPIO0) albo pokrętłem: obrót – następna/poprzednia strona, krótkie naciśnięcie – następna, przytrzymanie 1 s – automatyczne przełączanie wł./wył.</p>
+   <div class="form">
++    <div><label for="dType">Typ wyświetlacza</label><select id="dType" onchange="dMode()"><option value="0">OLED SSD1322 256×64</option><option value="1">TFT 2,4" ST7789 320×240</option></select></div>
+     <div><label class="chk"><input id="dEn" type="checkbox"> Wyświetlacz podłączony</label><label class="chk"><input id="dFlip" type="checkbox"> Obróć o 180°</label></div>
+     <div><label for="dAuto">Automatyczne przełączanie</label><select id="dAuto"><option value="0">wyłączone</option><option value="5">co 5 s</option><option value="10">co 10 s</option><option value="15">co 15 s</option><option value="30">co 30 s</option><option value="60">co 60 s</option></select></div>
+-    <div><label for="dSleep">Wygaszanie w nocy</label><select id="dSleep"><option value="0">nigdy</option><option value="1">po 1 min</option><option value="5">po 5 min</option><option value="10">po 10 min</option><option value="30">po 30 min</option><option value="60">po 60 min</option></select><div class="hint">bez produkcji i bez naciśnięcia przycisku</div></div>
+-    <div><label for="dCon">Jasność</label><input id="dCon" type="range" min="10" max="255" step="5" style="width:100%"></div>
++    <div><label for="dSleep">Wygaszanie w nocy</label><select id="dSleep"><option value="0">nigdy</option><option value="1">po 1 min</option><option value="5">po 5 min</option><option value="10">po 10 min</option><option value="30">po 30 min</option><option value="60">po 60 min</option></select><div class="hint">bez produkcji i bez użycia przycisku/pokrętła</div></div>
++    <div><label for="dCon">Jasność</label><input id="dCon" type="range" min="10" max="255" step="5" style="width:100%"><div class="hint tft">dla TFT działa, gdy BLK jest podłączone do GPIO</div></div>
++  </div>
++  <div class="form tft" style="margin-top:12px">
++    <div><label class="chk"><input id="dInv" type="checkbox"> Odwróć kolory</label><label class="chk"><input id="dBgr" type="checkbox"> Zamień czerwony z niebieskim</label><div class="hint">zaznacz, jeśli tło jest jasne albo kolory się nie zgadzają</div></div>
++    <div><label for="dBl">Podświetlenie BLK</label><select id="dBl" class="pin"></select></div>
++  </div>
++  <div class="form" style="margin-top:12px">
++    <div><label for="dEa">Pokrętło A (CLK)</label><select id="dEa" class="pin"></select></div>
++    <div><label for="dEb">Pokrętło B (DT)</label><select id="dEb" class="pin"></select></div>
++    <div><label for="dEs">Przycisk pokrętła (SW)</label><select id="dEs" class="pin"></select></div>
+   </div>
+   <label style="display:block;margin:14px 0 6px">Pokazywane strony</label>
+   <div id="dPages" class="pages"></div>
+   <div class="actions"><button onclick="saveDisp()">Zapisz wyświetlacz</button><button class="sec" onclick="nextDisp()">Następna strona</button></div>
+-  <div class="box">Podłączenie do złącza wyświetlacza SPI: DIN→GPIO9, SCLK→GPIO10, CS→GPIO11, DC→GPIO12, RES→GPIO13, VCC→3V3, GND. Moduł musi być ustawiony w tryb 4-wire SPI. W OpenDTU (Ustawienia → Sprzęt) zostaw typ wyświetlacza „brak”.</div>
++  <div class="box oled">Podłączenie do złącza wyświetlacza SPI: DIN→GPIO9, SCLK→GPIO10, CS→GPIO11, DC→GPIO12, RES→GPIO13, VCC→3V3, GND. Moduł musi być ustawiony w tryb 4-wire SPI. W OpenDTU (Ustawienia → Sprzęt) zostaw typ wyświetlacza „brak”.</div>
++  <div class="box tft">Podłączenie TFT do złącza wyświetlacza SPI: SDA→GPIO9, SCL→GPIO10, CS→GPIO11, DC→GPIO12, RES→GPIO13, VCC→3V3, GND, BLK→3V3 (stałe podświetlenie) albo do wybranego GPIO (jasność i wygaszanie). Pokrętło EC11: A i B do dwóch wolnych GPIO, wspólny pin C do GND, SW do GPIO, drugi pin przycisku do GND (podciąganie jest w ESP). W OpenDTU (Ustawienia → Sprzęt) zostaw typ wyświetlacza „brak”.</div>
++  <div class="box">Wolne GPIO na Fusion v2: <span id="dFree">–</span>. GPIO15 i GPIO16 zajmuje moduł RS485, jeśli SolarEdge jest podłączony przez RS485.</div>
+ </section>
+ 
+ <section>
+@@ -414,15 +426,26 @@ async function saveMppt(){
+   try{await post('/api/mppt/config',out);toast('Zapisano konfigurację paneli');}catch(e){toast('Błąd: '+e.message,false);}
+ }
+ 
++function dMode(){const t=$('dType').value==='1';document.querySelectorAll('.tft').forEach(e=>e.style.display=t?'':'none');document.querySelectorAll('.oled').forEach(e=>e.style.display=t?'none':'');}
+ async function loadDisp(){
+   const c=await get('/api/fusion/display');
+-  $('dEn').checked=c.enabled;$('dFlip').checked=c.flip;$('dAuto').value=c.auto_sec;$('dSleep').value=c.sleep_min;$('dCon').value=c.contrast;
++  const free=c.free_pins||[];
++  document.querySelectorAll('select.pin').forEach(s=>{s.innerHTML='<option value="-1">nie podłączony</option>'+free.map(p=>`<option value="${p}">GPIO${p}</option>`).join('');});
++  $('dFree').textContent=free.length?free.map(p=>'GPIO'+p).join(', '):'brak';
++  $('dType').value=c.type||0;$('dEn').checked=c.enabled;$('dFlip').checked=c.flip;$('dAuto').value=c.auto_sec;$('dSleep').value=c.sleep_min;$('dCon').value=c.contrast;
++  $('dInv').checked=c.tft_invert!==false;$('dBgr').checked=!!c.tft_bgr;
++  $('dBl').value=c.bl_pin??-1;$('dEa').value=c.enc_a??-1;$('dEb').value=c.enc_b??-1;$('dEs').value=c.enc_sw??-1;
+   $('dPages').innerHTML=c.pages.map(p=>`<label class="chk"><input type="checkbox" data-p="${p.id}"${p.on?' checked':''}> ${esc(p.name)}</label>`).join('');
++  dMode();
+ }
+ async function saveDisp(){
+   let mask=0;document.querySelectorAll('#dPages input').forEach(i=>{if(i.checked)mask|=1<<+i.dataset.p;});
+   if(!mask){toast('Wybierz co najmniej jedną stronę',false);return;}
+-  try{await post('/api/fusion/display',{enabled:$('dEn').checked,flip:$('dFlip').checked,auto_sec:+$('dAuto').value,sleep_min:+$('dSleep').value,contrast:+$('dCon').value,pages:mask});toast('Zapisano ustawienia wyświetlacza');}catch(e){toast('Błąd: '+e.message,false);}
++  const pins=[+$('dBl').value,+$('dEa').value,+$('dEb').value,+$('dEs').value].filter(p=>p>=0);
++  if(new Set(pins).size!==pins.length){toast('Ten sam GPIO wybrany dwa razy',false);return;}
++  if(($('dEa').value==='-1')!==($('dEb').value==='-1')){toast('Pokrętło potrzebuje obu pinów A i B',false);return;}
++  try{await post('/api/fusion/display',{enabled:$('dEn').checked,type:+$('dType').value,flip:$('dFlip').checked,auto_sec:+$('dAuto').value,sleep_min:+$('dSleep').value,contrast:+$('dCon').value,pages:mask,
++    tft_invert:$('dInv').checked,tft_bgr:$('dBgr').checked,bl_pin:+$('dBl').value,enc_a:+$('dEa').value,enc_b:+$('dEb').value,enc_sw:+$('dEs').value});toast('Zapisano ustawienia wyświetlacza');}catch(e){toast('Błąd: '+e.message,false);}
+ }
+ async function nextDisp(){try{await post('/api/fusion/display/next',{});}catch(e){toast('Błąd: '+e.message,false);}}
+ 
+diff --git a/include/FusionTftPages.h b/include/FusionTftPages.h
+new file mode 100644
+index 00000000..6660ff7b
+--- /dev/null
++++ b/include/FusionTftPages.h
+@@ -0,0 +1,46 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Page rendering for a 320x240 colour TFT (ST7789, 2.4").
++ * Text is drawn with U8g2 fonts into a 1 bit layer, which is then painted in
++ * the current colour into an 8 bit indexed frame buffer (palette ftPalette).
++ * No Arduino dependencies -> compiled natively for preview images too.
++ */
++#pragma once
++#include <stdint.h>
++#include "FusionDisplayPages.h"
++
++#define FT_W 320
++#define FT_H 240
++
++enum FtColor : uint8_t {
++    FT_BG = 0,   // screen background
++    FT_HEAD,     // header bar
++    FT_CARD,     // card background
++    FT_LINE,     // grid / separators
++    FT_WHITE,
++    FT_GREY,     // secondary text
++    FT_YELLOW,   // totals (dark text on it)
++    FT_DARK,     // text on yellow
++    FT_ORANGE,   // Hoymiles
++    FT_ORANGE_D, // Hoymiles area fill
++    FT_BLUE,     // SolarEdge
++    FT_BLUE_D,   // SolarEdge area fill
++    FT_GREEN,    // export / producing
++    FT_RED,      // import / offline
++    FT_CYAN,
++    FT_COLOR_COUNT
++};
++
++// RGB565 values of the palette
++extern const uint16_t ftPalette[FT_COLOR_COUNT];
++
++struct FtCanvas {
++    u8g2_t* u;    // 320x240 1 bit layer (full buffer, vertical_top_lsb)
++    uint8_t* fb;  // FT_W * FT_H bytes, one palette index per pixel
++    uint8_t ink;  // colour of the pending 1 bit layer
++};
++
++void ftRenderPage(FtCanvas& c, const FdData& d, uint8_t page, uint8_t pageNo, uint8_t pageCnt, bool autoRotate);
++void ftRenderOverlay(FtCanvas& c, const char* line1, const char* line2);
++// paints the pending 1 bit layer into fb and clears it (done by the render functions)
++void ftFlushLayer(FtCanvas& c);
+diff --git a/src/FusionDisplay.cpp b/src/FusionDisplay.cpp
+index 0cbd3e92..7b32ebe6 100644
+--- a/src/FusionDisplay.cpp
++++ b/src/FusionDisplay.cpp
+@@ -4,6 +4,7 @@
+ #include "Datastore.h"
+ #include "EnergyHistory.h"
+ #include "FusionDisplayPages.h"
++#include "FusionTftPages.h"
+ #include "HoymilesChannels.h"
+ #include "SdLogger.h"
+ #include "SolarEdge.h"
+@@ -12,6 +13,8 @@
+ #include <NetworkSettings.h>
+ #include <WiFi.h>
+ #include <soc/gpio_struct.h>
++#include <soc/gpio_reg.h>
++#include <esp_heap_caps.h>
+ #include <esp_timer.h>
+ #include <time.h>
+ 
+@@ -89,6 +92,134 @@ static uint8_t fd_gpio_cb(u8x8_t* u8x8, uint8_t msg, uint8_t arg_int, void* arg_
+     return 1;
+ }
+ 
++// ---------------------------------------------------------------- ST7789 TFT
++// same software SPI pins, mode 0, CS kept low for a whole command + data
++static inline void IRAM_ATTR tftByte(uint8_t b)
++{
++    for (uint8_t i = 0; i < 8; i++) {
++        if (b & 0x80) pinHi(FD_PIN_MOSI); else pinLo(FD_PIN_MOSI);
++        b <<= 1;
++        __asm__ __volatile__("nop; nop;");
++        pinHi(FD_PIN_SCK);
++        __asm__ __volatile__("nop; nop;");
++        pinLo(FD_PIN_SCK);
++    }
++}
++static void tftCmd(uint8_t c)
++{
++    pinLo(FD_PIN_CS);
++    pinLo(FD_PIN_DC);
++    tftByte(c);
++    pinHi(FD_PIN_DC);
++}
++static inline void tftEnd() { pinHi(FD_PIN_CS); }
++static void tftCmd1(uint8_t c, uint8_t d)
++{
++    tftCmd(c);
++    tftByte(d);
++    tftEnd();
++}
++static void tftWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
++{
++    tftCmd(0x2A); // CASET
++    tftByte(x0 >> 8); tftByte(x0); tftByte(x1 >> 8); tftByte(x1);
++    tftCmd(0x2B); // RASET
++    tftByte(y0 >> 8); tftByte(y0); tftByte(y1 >> 8); tftByte(y1);
++    tftCmd(0x2C); // RAMWR, data follows
++}
++
++static uint8_t s_layer[FT_W * FT_H / 8]; // 1 bit text layer for U8g2
++
++static const u8x8_display_info_t s_tftInfo = {
++    /* chip_enable_level = */ 0, /* chip_disable_level = */ 1,
++    /* post_chip_enable_wait_ns = */ 0, /* pre_chip_disable_wait_ns = */ 0,
++    /* reset_pulse_width_ms = */ 1, /* post_reset_wait_ms = */ 1,
++    /* sda_setup_time_ns = */ 0, /* sck_pulse_width_ns = */ 0,
++    /* sck_clock_hz = */ 8000000UL, /* spi_mode = */ 0, /* i2c_bus_clock_100kHz = */ 4,
++    /* data_setup_time_ns = */ 0, /* write_pulse_width_ns = */ 0,
++    /* tile_width = */ FT_W / 8, /* tile_height = */ FT_H / 8,
++    /* default_x_offset = */ 0, /* flipmode_x_offset = */ 0,
++    /* pixel_width = */ FT_W, /* pixel_height = */ FT_H
++};
++// U8g2 only renders into s_layer, the TFT is written by tftPump()
++static uint8_t tft_display_cb(u8x8_t* u8x8, uint8_t msg, uint8_t arg_int, void* arg_ptr)
++{
++    if (msg == U8X8_MSG_DISPLAY_SETUP_MEMORY) u8x8_d_helper_display_setup_memory(u8x8, &s_tftInfo);
++    return 1;
++}
++static uint8_t tft_dummy_cb(u8x8_t*, uint8_t, uint8_t, void*) { return 1; }
++
++// ---------------------------------------------------------------- encoder
++static const int8_t DRAM_ATTR QDEC[16] = { 0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0 };
++static volatile int16_t s_encAcc = 0;
++static volatile uint8_t s_encState = 0;
++static int8_t s_encA = -1, s_encB = -1;
++static portMUX_TYPE s_encMux = portMUX_INITIALIZER_UNLOCKED;
++
++static inline uint8_t IRAM_ATTR fastRead(int8_t pin)
++{
++    if (pin < 32) return (REG_READ(GPIO_IN_REG) >> pin) & 1;
++    return (REG_READ(GPIO_IN1_REG) >> (pin - 32)) & 1;
++}
++static void IRAM_ATTR encIsr()
++{
++    const uint8_t s = (fastRead(s_encA) << 1) | fastRead(s_encB);
++    portENTER_CRITICAL_ISR(&s_encMux);
++    s_encAcc += QDEC[(s_encState << 2) | s];
++    s_encState = s;
++    portEXIT_CRITICAL_ISR(&s_encMux);
++}
++
++bool FusionDisplayClass::pinAllowed(int pin)
++{
++    // GPIOs not used by radios, display, SD card, USB, flash/PSRAM or strapping
++    switch (pin) {
++    case 7: case 15: case 16:
++        return true;
++#ifndef W5500_CS
++    case 39: case 40: case 41: case 42: case 43: case 44:
++        return true;
++#endif
++    default:
++        return false;
++    }
++}
++
++void FusionDisplayClass::encoderSetup()
++{
++    const int8_t want[3] = { _cfg.encA, _cfg.encB, _cfg.encSw };
++    if (memcmp(want, _encPins, sizeof(want)) == 0) return;
++    if (_encPins[0] >= 0) detachInterrupt(digitalPinToInterrupt(_encPins[0]));
++    if (_encPins[1] >= 0) detachInterrupt(digitalPinToInterrupt(_encPins[1]));
++    memcpy(_encPins, want, sizeof(want));
++    if (_cfg.encSw >= 0) pinMode(_cfg.encSw, INPUT_PULLUP);
++    if (_cfg.encA >= 0 && _cfg.encB >= 0 && _cfg.encA != _cfg.encB) {
++        pinMode(_cfg.encA, INPUT_PULLUP);
++        pinMode(_cfg.encB, INPUT_PULLUP);
++        s_encA = _cfg.encA;
++        s_encB = _cfg.encB;
++        s_encState = (fastRead(s_encA) << 1) | fastRead(s_encB);
++        s_encAcc = 0;
++        attachInterrupt(digitalPinToInterrupt(_cfg.encA), encIsr, CHANGE);
++        attachInterrupt(digitalPinToInterrupt(_cfg.encB), encIsr, CHANGE);
++        ESP_LOGI(TAG, "Encoder on GPIO%d/%d, button GPIO%d", _cfg.encA, _cfg.encB, _cfg.encSw);
++    } else {
++        _encPins[0] = _encPins[1] = -1;
++    }
++}
++
++// detents turned since the last call (EC11: 4 state changes per detent)
++int FusionDisplayClass::encoderSteps()
++{
++    if (_encPins[0] < 0) return 0;
++    portENTER_CRITICAL(&s_encMux);
++    const int16_t acc = s_encAcc;
++    const int steps = acc / 4;
++    s_encAcc = acc - steps * 4;
++    portEXIT_CRITICAL(&s_encMux);
++    return steps;
++}
++
+ // ---------------------------------------------------------------- class
+ FusionDisplayClass::FusionDisplayClass()
+     : _loopTask(20 * TASK_MILLISECOND, TASK_FOREVER, std::bind(&FusionDisplayClass::loop, this))
+@@ -99,26 +230,156 @@ void FusionDisplayClass::init(Scheduler& scheduler)
+ {
+     loadConfig();
+     pinMode(FD_PIN_BUTTON, INPUT_PULLUP);
++    encoderSetup();
+     if (_cfg.enabled) begin();
+     _lastActivity = _lastSwitch = millis();
+     scheduler.addTask(_loopTask);
+     _loopTask.enable();
+ }
+ 
++bool FusionDisplayClass::tftBegin()
++{
++    if (!_fb) {
++        _fb = static_cast<uint8_t*>(heap_caps_malloc(FT_W * FT_H, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
++        if (!_fb) _fb = static_cast<uint8_t*>(malloc(FT_W * FT_H));
++        if (!_fb) {
++            ESP_LOGE(TAG, "No memory for the TFT frame buffer");
++            return false;
++        }
++    }
++    for (uint8_t p : { FD_PIN_MOSI, FD_PIN_SCK, FD_PIN_CS, FD_PIN_DC, FD_PIN_RST }) {
++        pinMode(p, OUTPUT);
++        digitalWrite(p, p == FD_PIN_CS || p == FD_PIN_DC ? HIGH : LOW);
++    }
++    delay(10);
++    digitalWrite(FD_PIN_RST, HIGH);
++    delay(120);
++    tftCmd(0x01); tftEnd(); // software reset
++    delay(150);
++    tftCmd(0x11); tftEnd(); // sleep out
++    delay(120);
++    tftCmd1(0x3A, 0x55);    // 16 bit colour
++    tftCmd1(0x36, (_cfg.flip ? 0xA0 : 0x60) | (_cfg.tftBgr ? 0x08 : 0x00)); // landscape 320x240
++    tftCmd(_cfg.tftInvert ? 0x21 : 0x20); tftEnd();
++    tftCmd(0x13); tftEnd(); // normal mode
++    // clear to background
++    tftWindow(0, 0, FT_W - 1, FT_H - 1);
++    const uint16_t bg = ftPalette[FT_BG];
++    for (uint32_t i = 0; i < (uint32_t)FT_W * FT_H; i++) {
++        tftByte(bg >> 8);
++        tftByte(bg);
++    }
++    tftEnd();
++    tftCmd(0x29); tftEnd(); // display on
++
++    u8g2_SetupDisplay(&s_u8g2, tft_display_cb, u8x8_cad_001, tft_dummy_cb, tft_dummy_cb);
++    u8g2_SetupBuffer(&s_u8g2, s_layer, FT_H / 8, u8g2_ll_hvline_vertical_top_lsb, U8G2_R0);
++    u8g2_ClearBuffer(&s_u8g2);
++    memset(_fb, FT_BG, FT_W * FT_H);
++    _hashValid = false;
++    _sendPos = 300;
++    ESP_LOGI(TAG, "ST7789 320x240 started");
++    return true;
++}
++
++void FusionDisplayClass::setBrightness(uint8_t v)
++{
++    if (_type == FD_TYPE_SSD1322) {
++        u8g2_SetContrast(&s_u8g2, v);
++    } else if (_cfg.blPin >= 0) {
++        analogWrite(_cfg.blPin, v);
++    }
++}
++
++void FusionDisplayClass::setPower(bool on)
++{
++    if (_type == FD_TYPE_SSD1322) {
++        u8g2_SetPowerSave(&s_u8g2, on ? 0 : 1);
++        return;
++    }
++    if (on) {
++        tftCmd(0x11); tftEnd();
++        delay(120);
++        tftCmd(0x29); tftEnd();
++        setBrightness(_cfg.contrast);
++        _forceRedraw = true;
++    } else {
++        if (_cfg.blPin >= 0) analogWrite(_cfg.blPin, 0);
++        tftCmd(0x28); tftEnd(); // display off
++        tftCmd(0x10); tftEnd(); // sleep in
++    }
++}
++
+ void FusionDisplayClass::begin()
+ {
+-    if (_started) {
+-        u8g2_SetPowerSave(&s_u8g2, 0);
++    if (_started && _type == _cfg.type) {
++        setPower(true);
+         return;
+     }
+-    u8g2_Setup_ssd1322_nhd_256x64_f(&s_u8g2, _cfg.flip ? U8G2_R2 : U8G2_R0, fd_byte_cb, fd_gpio_cb);
+-    u8g2_InitDisplay(&s_u8g2);
+-    u8g2_SetPowerSave(&s_u8g2, 0);
+-    u8g2_SetContrast(&s_u8g2, _cfg.contrast);
++    if (_started) setPower(false); // other display type selected: switch over
++    _started = false;
++    _type = _cfg.type;
++    if (_type == FD_TYPE_ST7789) {
++        if (!tftBegin()) return;
++    } else {
++        u8g2_Setup_ssd1322_nhd_256x64_f(&s_u8g2, _cfg.flip ? U8G2_R2 : U8G2_R0, fd_byte_cb, fd_gpio_cb);
++        u8g2_InitDisplay(&s_u8g2);
++        u8g2_SetPowerSave(&s_u8g2, 0);
++        ESP_LOGI(TAG, "SSD1322 started");
++    }
+     _u8g2 = &s_u8g2;
+     _started = true;
+     _sleeping = false;
+-    ESP_LOGI(TAG, "SSD1322 started");
++    setBrightness(_cfg.contrast);
++    _forceRedraw = true;
++}
++
++// compare 16x16 blocks with the last frame, queue the changed ones
++void FusionDisplayClass::tftMarkDirty()
++{
++    for (int by = 0; by < 15; by++) {
++        for (int bx = 0; bx < 20; bx++) {
++            uint32_t h = 2166136261u;
++            const uint8_t* p = _fb + by * 16 * FT_W + bx * 16;
++            for (int y = 0; y < 16; y++, p += FT_W) {
++                for (int x = 0; x < 16; x++) h = (h ^ p[x]) * 16777619u;
++            }
++            const int i = by * 20 + bx;
++            _dirty[i] = !_hashValid || h != _blockHash[i];
++            _blockHash[i] = h;
++        }
++    }
++    _hashValid = true;
++    _sendPos = 0;
++}
++
++// send up to 'budget' changed blocks (keeps each loop call short for the radios)
++void FusionDisplayClass::tftPump(uint16_t budget)
++{
++    while (_sendPos < 300 && budget) {
++        if (!_dirty[_sendPos]) {
++            _sendPos++;
++            continue;
++        }
++        // run of consecutive dirty blocks in this block row
++        const int by = _sendPos / 20, bx0 = _sendPos % 20;
++        int bx1 = bx0;
++        while (bx1 + 1 < 20 && _dirty[by * 20 + bx1 + 1] && (uint16_t)(bx1 - bx0 + 1) < budget) bx1++;
++        const int x0 = bx0 * 16, x1 = bx1 * 16 + 15, y0 = by * 16;
++        tftWindow(x0, y0, x1, y0 + 15);
++        for (int y = y0; y < y0 + 16; y++) {
++            const uint8_t* p = _fb + y * FT_W + x0;
++            for (int x = x0; x <= x1; x++) {
++                const uint16_t c = ftPalette[*p++];
++                tftByte(c >> 8);
++                tftByte(c);
++            }
++        }
++        tftEnd();
++        for (int b = bx0; b <= bx1; b++) _dirty[by * 20 + b] = 0;
++        budget -= (bx1 - bx0 + 1);
++        _sendPos = by * 20 + bx1 + 1;
++    }
+ }
+ 
+ FusionDisplayConfig FusionDisplayClass::getConfig()
+@@ -130,23 +391,33 @@ FusionDisplayConfig FusionDisplayClass::getConfig()
+ bool FusionDisplayClass::setConfig(const FusionDisplayConfig& c)
+ {
+     bool ok;
++    FusionDisplayConfig old;
+     {
+         std::lock_guard<std::mutex> lock(_mutex);
++        old = _cfg;
+         _cfg = c;
+-        _cfg.contrast = c.contrast;
+         if (_cfg.pages == 0) _cfg.pages = 1;
+         ok = saveConfig();
+     }
++    encoderSetup();
++    if (old.blPin >= 0 && old.blPin != _cfg.blPin) {
++        analogWrite(old.blPin, 0);
++    }
++    const bool restartTft = _started && _cfg.type == FD_TYPE_ST7789
++        && (old.flip != _cfg.flip || old.tftInvert != _cfg.tftInvert || old.tftBgr != _cfg.tftBgr);
+     if (_cfg.enabled) {
++        if (restartTft) _started = false; // re-run the init sequence with the new orientation/colours
+         begin();
+-        u8g2_SetContrast(&s_u8g2, _cfg.contrast);
+-        u8g2_SetDisplayRotation(&s_u8g2, _cfg.flip ? U8G2_R2 : U8G2_R0);
++        if (_started) {
++            if (_type == FD_TYPE_SSD1322) u8g2_SetDisplayRotation(&s_u8g2, _cfg.flip ? U8G2_R2 : U8G2_R0);
++            setBrightness(_cfg.contrast);
++        }
+         _lastActivity = millis();
+         _sleeping = false;
+-        _lastDraw = 0;
++        _forceRedraw = true;
+     } else if (_started) {
+-        u8g2_ClearDisplay(&s_u8g2);
+-        u8g2_SetPowerSave(&s_u8g2, 1);
++        if (_type == FD_TYPE_SSD1322) u8g2_ClearDisplay(&s_u8g2);
++        setPower(false);
+     }
+     return ok;
+ }
+@@ -155,10 +426,19 @@ void FusionDisplayClass::toJson(JsonObject root)
+ {
+     const FusionDisplayConfig c = getConfig();
+     root["enabled"] = c.enabled;
++    root["type"] = c.type;
+     root["auto_sec"] = c.autoSec;
+     root["sleep_min"] = c.sleepMin;
+     root["contrast"] = c.contrast;
+     root["flip"] = c.flip;
++    root["tft_invert"] = c.tftInvert;
++    root["tft_bgr"] = c.tftBgr;
++    root["bl_pin"] = c.blPin;
++    root["enc_a"] = c.encA;
++    root["enc_b"] = c.encB;
++    root["enc_sw"] = c.encSw;
++    auto freePins = root["free_pins"].to<JsonArray>();
++    for (int p = 0; p < 49; p++) if (pinAllowed(p)) freePins.add(p);
+     auto pages = root["pages"].to<JsonArray>();
+     for (uint8_t p = 0; p < FD_PAGE_COUNT; p++) {
+         auto o = pages.add<JsonObject>();
+@@ -173,6 +453,11 @@ void FusionDisplayClass::toJson(JsonObject root)
+ 
+ void FusionDisplayClass::nextPage() { _webNext = true; }
+ 
++static int8_t pinOrNone(int p)
++{
++    return FusionDisplayClass::pinAllowed(p) ? p : -1;
++}
++
+ void FusionDisplayClass::loadConfig()
+ {
+     File f = LittleFS.open(CFG_FILE, "r");
+@@ -180,10 +465,17 @@ void FusionDisplayClass::loadConfig()
+     JsonDocument doc;
+     if (!deserializeJson(doc, f)) {
+         _cfg.enabled = doc["enabled"] | false;
++        _cfg.type = (doc["type"] | 0) == FD_TYPE_ST7789 ? FD_TYPE_ST7789 : FD_TYPE_SSD1322;
+         _cfg.autoSec = doc["auto_sec"] | 10;
+         _cfg.sleepMin = doc["sleep_min"] | 10;
+         _cfg.contrast = doc["contrast"] | 160;
+         _cfg.flip = doc["flip"] | false;
++        _cfg.tftInvert = doc["tft_invert"] | true;
++        _cfg.tftBgr = doc["tft_bgr"] | false;
++        _cfg.blPin = pinOrNone(doc["bl_pin"] | -1);
++        _cfg.encA = pinOrNone(doc["enc_a"] | -1);
++        _cfg.encB = pinOrNone(doc["enc_b"] | -1);
++        _cfg.encSw = pinOrNone(doc["enc_sw"] | -1);
+         _cfg.pages = doc["pages"] | 0xFF;
+         if ((doc["pv"] | 1) < 2) { // v1 had no chart page (bit 1): shift bits up, enable chart
+             const uint8_t m = _cfg.pages;
+@@ -197,10 +489,17 @@ bool FusionDisplayClass::saveConfig()
+ {
+     JsonDocument doc;
+     doc["enabled"] = _cfg.enabled;
++    doc["type"] = _cfg.type;
+     doc["auto_sec"] = _cfg.autoSec;
+     doc["sleep_min"] = _cfg.sleepMin;
+     doc["contrast"] = _cfg.contrast;
+     doc["flip"] = _cfg.flip;
++    doc["tft_invert"] = _cfg.tftInvert;
++    doc["tft_bgr"] = _cfg.tftBgr;
++    doc["bl_pin"] = _cfg.blPin;
++    doc["enc_a"] = _cfg.encA;
++    doc["enc_b"] = _cfg.encB;
++    doc["enc_sw"] = _cfg.encSw;
+     doc["pages"] = _cfg.pages;
+     doc["pv"] = 2;
+     File f = LittleFS.open(CFG_FILE, "w");
+@@ -225,14 +524,24 @@ uint8_t FusionDisplayClass::nextAvailable(const FdData& d, uint8_t from)
+     return FD_PAGE_POWER;
+ }
+ 
++uint8_t FusionDisplayClass::prevAvailable(const FdData& d, uint8_t from)
++{
++    for (uint8_t k = 1; k <= FD_PAGE_COUNT; k++) {
++        const uint8_t p = (from + FD_PAGE_COUNT * 2 - k) % FD_PAGE_COUNT;
++        if (((_cfg.pages >> p) & 1) && fdPageAvailable(d, p)) return p;
++    }
++    return FD_PAGE_POWER;
++}
++
+ void FusionDisplayClass::loop()
+ {
+     if (!_cfg.enabled || !_started) return;
+     const uint32_t now = millis();
++    const bool tft = _type == FD_TYPE_ST7789;
+ 
+-    // ---- button (active low, debounced)
++    // ---- BOOT button or encoder push (active low, debounced)
+     bool shortPress = false, longPress = false;
+-    const bool down = digitalRead(FD_PIN_BUTTON) == LOW;
++    const bool down = digitalRead(FD_PIN_BUTTON) == LOW || (_cfg.encSw >= 0 && digitalRead(_cfg.encSw) == LOW);
+     if (down != _btnDown && now - _btnChange > DEBOUNCE_MS) {
+         _btnDown = down;
+         _btnChange = now;
+@@ -251,49 +560,63 @@ void FusionDisplayClass::loop()
+         _webNext = false;
+         shortPress = true;
+     }
++    int turn = encoderSteps();
+ 
+-    bool redraw = now - _lastDraw >= 1000;
+-    if (shortPress || longPress) {
++    if (shortPress || longPress || turn) {
+         _lastActivity = now;
+         if (_sleeping) {
+             _sleeping = false;
+-            u8g2_SetPowerSave(&s_u8g2, 0);
+-            shortPress = false; // first press only wakes the screen
++            setPower(true);
++            shortPress = false; // first action only wakes the screen
++            turn = 0;
+         }
+-        redraw = true;
++        _forceRedraw = true;
+     }
+ 
+     // ---- night sleep
+     if (!_sleeping && _cfg.sleepMin > 0 && !producing() && now - _lastActivity > _cfg.sleepMin * 60000UL) {
+         _sleeping = true;
+-        u8g2_SetPowerSave(&s_u8g2, 1);
++        setPower(false);
+     }
+     if (_sleeping) {
+         if (producing()) { // morning: production started
+             _sleeping = false;
+             _lastActivity = now;
+-            u8g2_SetPowerSave(&s_u8g2, 0);
++            setPower(true);
+         } else {
+             return;
+         }
+     }
+-    if (!redraw) return;
+ 
+     static FdData d;
+-    collect(d);
+-    if (!(((_cfg.pages >> _page) & 1) && fdPageAvailable(d, _page))) _page = nextAvailable(d, _page);
+-
+-    if (shortPress) {
+-        _page = nextAvailable(d, _page);
++    if (shortPress || longPress || turn) {
++        collect(d);
++        if (shortPress || turn > 0) {
++            for (int i = 0; i < (turn > 0 ? turn : 1); i++) _page = nextAvailable(d, _page);
++        }
++        for (int i = 0; i < -turn; i++) _page = prevAvailable(d, _page);
+         _lastSwitch = now;
+     }
+     if (longPress) {
+         _autoOn = !_autoOn;
+-        _lastSwitch = now;
+         _ov1 = "Automatyczne przełączanie";
+         _ov2 = _autoOn ? (String("włączone · co ") + _cfg.autoSec + " s") : String("wyłączone · krótko = następna");
+         _overlayUntil = now + 2000;
+     }
++
++    // TFT: finish sending the previous frame first (small portions per call)
++    if (tft && _sendPos < 300) {
++        tftPump(24);
++        return;
++    }
++
++    const bool redraw = _forceRedraw || now - _lastDraw >= 1000
++        || (_overlayUntil && now >= _overlayUntil && now - _overlayUntil < 100);
++    if (!redraw) return;
++    _forceRedraw = false;
++
++    collect(d);
++    if (!(((_cfg.pages >> _page) & 1) && fdPageAvailable(d, _page))) _page = nextAvailable(d, _page);
+     if (_autoOn && _cfg.autoSec > 0 && now - _lastSwitch >= _cfg.autoSec * 1000UL) {
+         _page = nextAvailable(d, _page);
+         _lastSwitch = now;
+@@ -307,10 +630,18 @@ void FusionDisplayClass::loop()
+         }
+     }
+ 
+-    u8g2_ClearBuffer(&s_u8g2);
+-    fdRenderPage(&s_u8g2, d, _page, no ? no : 1, cnt ? cnt : 1, _autoOn && _cfg.autoSec > 0);
+-    if (now < _overlayUntil) fdRenderOverlay(&s_u8g2, _ov1.c_str(), _ov2.length() ? _ov2.c_str() : nullptr);
+-    u8g2_SendBuffer(&s_u8g2);
++    if (tft) {
++        FtCanvas c { &s_u8g2, _fb, FT_WHITE };
++        ftRenderPage(c, d, _page, no ? no : 1, cnt ? cnt : 1, _autoOn && _cfg.autoSec > 0);
++        if (now < _overlayUntil) ftRenderOverlay(c, _ov1.c_str(), _ov2.length() ? _ov2.c_str() : nullptr);
++        tftMarkDirty();
++        tftPump(24);
++    } else {
++        u8g2_ClearBuffer(&s_u8g2);
++        fdRenderPage(&s_u8g2, d, _page, no ? no : 1, cnt ? cnt : 1, _autoOn && _cfg.autoSec > 0);
++        if (now < _overlayUntil) fdRenderOverlay(&s_u8g2, _ov1.c_str(), _ov2.length() ? _ov2.c_str() : nullptr);
++        u8g2_SendBuffer(&s_u8g2);
++    }
+     _lastDraw = now;
+ }
+ 
+diff --git a/src/FusionTftPages.cpp b/src/FusionTftPages.cpp
+new file mode 100644
+index 00000000..0125e703
+--- /dev/null
++++ b/src/FusionTftPages.cpp
+@@ -0,0 +1,603 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "FusionTftPages.h"
++#include <math.h>
++#include <stdio.h>
++#include <string.h>
++
++#define W FT_W
++#define H FT_H
++
++#define F_S u8g2_font_helvR08_te   // small
++#define F_SB u8g2_font_helvB08_te
++#define F_R u8g2_font_helvR10_te   // rows
++#define F_RB u8g2_font_helvB10_te
++#define F_M u8g2_font_helvB12_te   // card values
++#define F_L u8g2_font_helvB14_te
++#define F_XL u8g2_font_helvB18_te  // units next to big numbers
++#define F_BIG u8g2_font_fub42_tn   // digits only
++#define F_BIG2 u8g2_font_fub30_tn
++
++static inline uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) { return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3); }
++
++const uint16_t ftPalette[FT_COLOR_COUNT] = {
++    rgb(0x0B, 0x12, 0x20), // BG
++    rgb(0x16, 0x21, 0x36), // HEAD
++    rgb(0x1A, 0x25, 0x3A), // CARD
++    rgb(0x33, 0x41, 0x55), // LINE
++    rgb(0xF1, 0xF5, 0xF9), // WHITE
++    rgb(0x94, 0xA3, 0xB8), // GREY
++    rgb(0xFF, 0xC8, 0x3D), // YELLOW
++    rgb(0x1F, 0x17, 0x00), // DARK
++    rgb(0xF5, 0x9E, 0x0B), // ORANGE
++    rgb(0x8A, 0x5A, 0x0A), // ORANGE_D
++    rgb(0x3B, 0x82, 0xF6), // BLUE
++    rgb(0x1E, 0x45, 0x8C), // BLUE_D
++    rgb(0x22, 0xC5, 0x5E), // GREEN
++    rgb(0xEF, 0x44, 0x44), // RED
++    rgb(0x22, 0xD3, 0xEE), // CYAN
++};
++
++static const char* const TITLES[FD_PAGE_COUNT] = {
++    "Produkcja", "Wykres mocy", "Sieć", "Hoymiles MPPT", "Panele", "SolarEdge", "Historia", "Status"
++};
++
++// ---------------------------------------------------------------- formatting
++static void fnum(char* b, size_t n, float v, int dec)
++{
++    snprintf(b, n, "%.*f", dec, v);
++    for (char* p = b; *p; p++) if (*p == '.') *p = ',';
++}
++// number and unit separately (big numbers are drawn with a digits-only font)
++static void fpowSplit(char* num, size_t n, const char** unit, float w)
++{
++    w = fabsf(w);
++    if (w >= 1000) {
++        fnum(num, n, w / 1000.0f, w >= 10000 ? 1 : 2);
++        *unit = "kW";
++    } else {
++        snprintf(num, n, "%.0f", w);
++        *unit = "W";
++    }
++}
++static void fpow(char* b, size_t n, float w)
++{
++    char t[16];
++    const char* u;
++    fpowSplit(t, sizeof(t), &u, w);
++    snprintf(b, n, "%s %s", t, u);
++}
++static void fkwhSplit(char* num, size_t n, const char** unit, float k)
++{
++    if (k < 0) { snprintf(num, n, "-"); *unit = ""; return; }
++    if (k >= 1000) { fnum(num, n, k / 1000.0f, 2); *unit = "MWh"; return; }
++    fnum(num, n, k, k >= 100 ? 1 : 2);
++    *unit = "kWh";
++}
++static void fkwh(char* b, size_t n, float k)
++{
++    char t[16];
++    const char* u;
++    fkwhSplit(t, sizeof(t), &u, k);
++    if (*u) snprintf(b, n, "%s %s", t, u); else snprintf(b, n, "%s", t);
++}
++static float sum2(float a, float b)
++{
++    if (a < 0 && b < 0) return -1;
++    return (a < 0 ? 0 : a) + (b < 0 ? 0 : b);
++}
++
++// ---------------------------------------------------------------- canvas
++void ftFlushLayer(FtCanvas& c)
++{
++    uint8_t* buf = u8g2_GetBufferPtr(c.u);
++    const uint8_t ink = c.ink;
++    for (int row = 0; row < H / 8; row++) {
++        uint8_t* src = buf + row * W;
++        for (int x = 0; x < W; x++) {
++            uint8_t v = src[x];
++            if (!v) continue;
++            src[x] = 0;
++            uint8_t* dst = c.fb + (row * 8) * W + x;
++            for (int b = 0; b < 8; b++, dst += W) {
++                if (v & (1 << b)) *dst = ink;
++            }
++        }
++    }
++}
++
++static void ink(FtCanvas& c, uint8_t col)
++{
++    if (col == c.ink) return;
++    ftFlushLayer(c);
++    c.ink = col;
++}
++
++static void box(FtCanvas& c, int x, int y, int w, int h, uint8_t col)
++{
++    ftFlushLayer(c); // keep painter's order
++    if (x < 0) { w += x; x = 0; }
++    if (y < 0) { h += y; y = 0; }
++    if (x + w > W) w = W - x;
++    if (y + h > H) h = H - y;
++    if (w <= 0 || h <= 0) return;
++    for (int yy = y; yy < y + h; yy++) memset(c.fb + yy * W + x, col, w);
++}
++
++static void rbox(FtCanvas& c, int x, int y, int w, int h, int r, uint8_t col)
++{
++    box(c, x, y + r, w, h - 2 * r, col);
++    for (int i = 0; i < r; i++) {
++        // quarter circle inset for row i (from the top/bottom edge)
++        const float dy = r - i - 0.5f;
++        const int in = r - (int)lroundf(sqrtf((float)r * r - dy * dy));
++        box(c, x + in, y + i, w - 2 * in, 1, col);
++        box(c, x + in, y + h - 1 - i, w - 2 * in, 1, col);
++    }
++}
++
++static void hline(FtCanvas& c, int x, int y, int w, uint8_t col) { box(c, x, y, w, 1, col); }
++static void vline(FtCanvas& c, int x, int y, int h, uint8_t col) { box(c, x, y, 1, h, col); }
++static void pix(FtCanvas& c, int x, int y, uint8_t col)
++{
++    if (x >= 0 && x < W && y >= 0 && y < H) c.fb[y * W + x] = col;
++}
++
++static int width(FtCanvas& c, const uint8_t* font, const char* s)
++{
++    u8g2_SetFont(c.u, font);
++    return u8g2_GetUTF8Width(c.u, s);
++}
++static int txt(FtCanvas& c, int x, int y, const uint8_t* font, uint8_t col, const char* s)
++{
++    ink(c, col);
++    u8g2_SetFont(c.u, font);
++    return x + u8g2_DrawUTF8(c.u, x, y, s);
++}
++static void rtxt(FtCanvas& c, int xr, int y, const uint8_t* font, uint8_t col, const char* s)
++{
++    txt(c, xr - width(c, font, s), y, font, col, s);
++}
++static void ctxt(FtCanvas& c, int xc, int y, const uint8_t* font, uint8_t col, const char* s)
++{
++    txt(c, xc - width(c, font, s) / 2, y, font, col, s);
++}
++
++// big number + unit, left aligned at x; returns right edge
++static int bigValue(FtCanvas& c, int x, int y, const uint8_t* font, uint8_t col, const char* num, const char* unit, uint8_t ucol)
++{
++    int xe = txt(c, x, y, font, col, num);
++    if (unit && *unit) xe = txt(c, xe + 6, y, F_XL, ucol, unit);
++    return xe;
++}
++
++// ---------------------------------------------------------------- frame
++static void header(FtCanvas& c, const FdData& d, uint8_t page, uint8_t no, uint8_t cnt, bool autoRotate)
++{
++    box(c, 0, 0, W, 30, FT_HEAD);
++    txt(c, 10, 21, F_L, FT_WHITE, TITLES[page]);
++    int xr = W - 10;
++    if (d.timeValid) {
++        rtxt(c, xr, 21, F_L, FT_WHITE, d.clock);
++        xr -= width(c, F_L, d.clock) + 12;
++    }
++    // page dots
++    const int dot = 6, gap = 4;
++    int x = xr - cnt * (dot + gap) + gap;
++    for (uint8_t i = 1; i <= cnt; i++, x += dot + gap) {
++        rbox(c, x, 12, dot, dot, 3, i == no ? FT_YELLOW : FT_LINE);
++    }
++    if (!autoRotate) { // pause marker = automatic switching off
++        const int px = xr - cnt * (dot + gap) - 12;
++        box(c, px, 10, 2, 10, FT_GREY);
++        box(c, px + 4, 10, 2, 10, FT_GREY);
++    }
++}
++
++// key/value row with a thin separator below
++static void kvRow(FtCanvas& c, int x, int xr, int y, const char* k, const char* v, uint8_t vcol = FT_WHITE, bool sep = true)
++{
++    txt(c, x, y, F_R, FT_GREY, k);
++    rtxt(c, xr, y, F_RB, vcol, v);
++    if (sep) hline(c, x, y + 8, xr - x, FT_LINE);
++}
++
++// ---------------------------------------------------------------- pages
++static void sourceCard(FtCanvas& c, int x, int y, int w, int h, uint8_t accent, const char* name,
++    const char* value, const char* sub, const char* chip, uint8_t chipCol)
++{
++    rbox(c, x, y, w, h, 8, FT_CARD);
++    box(c, x + 10, y, w - 20, 3, accent);
++    txt(c, x + 10, y + 22, F_R, FT_GREY, name);
++    txt(c, x + 10, y + 48, F_L, FT_WHITE, value);
++    if (sub) txt(c, x + 10, y + 68, F_S, FT_GREY, sub);
++    if (chip) {
++        const int cw = width(c, F_SB, chip) + 14;
++        rbox(c, x + 8, y + h - 26, cw, 18, 9, FT_BG);
++        txt(c, x + 15, y + h - 13, F_SB, chipCol, chip);
++    }
++}
++
++static void pagePower(FtCanvas& c, const FdData& d)
++{
++    char n[24], b[32], s[32];
++    const char* u;
++    const float tot = d.hoyW + d.seW;
++    const bool producing = tot >= 1.0f;
++
++    txt(c, 12, 52, F_R, FT_GREY, producing ? "Moc teraz" : "Moc teraz · brak produkcji");
++    fpowSplit(n, sizeof(n), &u, tot);
++    bigValue(c, 10, 104, F_BIG, producing ? FT_WHITE : FT_GREY, n, u, FT_GREY);
++
++    // today, yellow highlighted
++    rbox(c, 204, 40, 106, 68, 10, FT_YELLOW);
++    txt(c, 214, 58, F_RB, FT_DARK, "Dziś");
++    fkwhSplit(n, sizeof(n), &u, sum2(d.todayHoy, d.todaySe));
++    txt(c, 214, 84, F_XL, FT_DARK, n);
++    txt(c, 214, 100, F_SB, FT_DARK, u);
++
++    // three source cards
++    const int y = 122, h = 110, w = 96, g = 9;
++    fpow(b, sizeof(b), d.hoyW);
++    fkwh(n, sizeof(n), d.todayHoy);
++    snprintf(s, sizeof(s), "dziś %s", n);
++    sourceCard(c, 10, y, w, h, FT_ORANGE, "Hoymiles", d.hoyReachable ? b : "-", s,
++        d.hoyReachable ? (d.hoyW >= 1 ? "produkuje" : "czuwa") : "offline", d.hoyReachable ? FT_GREEN : FT_RED);
++
++    if (d.seConfigured) {
++        fpow(b, sizeof(b), d.seW);
++        fkwh(n, sizeof(n), d.todaySe);
++        snprintf(s, sizeof(s), "dziś %s", n);
++        sourceCard(c, 10 + w + g, y, w, h, FT_BLUE, "SolarEdge", d.seValid ? b : "-", s,
++            d.seValid ? (d.seW >= 1 ? "produkuje" : "czuwa") : "offline", d.seValid ? FT_GREEN : FT_RED);
++    } else {
++        sourceCard(c, 10 + w + g, y, w, h, FT_BLUE, "SolarEdge", "-", nullptr, "wyłączony", FT_GREY);
++    }
++
++    if (d.meterValid) {
++        const bool exp = d.gridW >= 0;
++        fpow(b, sizeof(b), d.gridW);
++        sourceCard(c, 10 + 2 * (w + g), y, w, h, exp ? FT_GREEN : FT_RED, "Sieć", b, exp ? "oddawane" : "pobierane",
++            exp ? "eksport" : "pobór", exp ? FT_GREEN : FT_RED);
++    } else {
++        sourceCard(c, 10 + 2 * (w + g), y, w, h, FT_GREEN, "Sieć", "-", nullptr, "brak licznika", FT_GREY);
++    }
++}
++
++static void pageGrid(FtCanvas& c, const FdData& d)
++{
++    char n[24], b[32];
++    const char* u;
++    const bool exp = d.gridW >= 0;
++    const uint8_t col = exp ? FT_GREEN : FT_RED;
++    txt(c, 12, 54, F_RB, col, exp ? "EKSPORT DO SIECI" : "POBÓR Z SIECI");
++    rtxt(c, W - 12, 54, F_R, FT_GREY, "teraz");
++    fpowSplit(n, sizeof(n), &u, d.gridW);
++    bigValue(c, 10, 106, F_BIG, col, n, u, FT_GREY);
++
++    const float prod = sum2(d.todayHoy, d.todaySe);
++    float self = -1;
++    if (prod > 0 && d.todayExp >= 0) { self = prod - d.todayExp; if (self < 0) self = 0; }
++
++    struct T { const char* k; float v; uint8_t col; bool pct; } t[4] = {
++        { "eksport dziś", d.todayExp, FT_GREEN, false },
++        { "pobór dziś", d.todayImp, FT_RED, false },
++        { "zużyte z PV", self, FT_WHITE, false },
++        { "autokonsumpcja", self >= 0 && prod > 0 ? 100.0f * self / prod : -1, FT_DARK, true },
++    };
++    const int w = 145, h = 52;
++    for (int i = 0; i < 4; i++) {
++        const int x = 10 + (i % 2) * (w + 10), y = 124 + (i / 2) * (h + 8);
++        const bool yel = t[i].pct;
++        rbox(c, x, y, w, h, 8, yel ? FT_YELLOW : FT_CARD);
++        txt(c, x + 10, y + 18, F_S, yel ? FT_DARK : FT_GREY, t[i].k);
++        if (t[i].pct) {
++            if (t[i].v < 0) snprintf(b, sizeof(b), "-"); else snprintf(b, sizeof(b), "%.0f %%", t[i].v);
++        } else fkwh(b, sizeof(b), t[i].v);
++        txt(c, x + 10, y + 42, F_L, t[i].col, b);
++    }
++}
++
++static void pageMppt(FtCanvas& c, const FdData& d)
++{
++    char b[32], t[16];
++    const int cx[5] = { 12, 120, 182, 246, 310 }; // name | U(r) | I(r) | P(r) | today(r)
++    int y = 50;
++    txt(c, cx[0], y, F_S, FT_GREY, "MPPT");
++    rtxt(c, cx[1], y, F_S, FT_GREY, "napięcie");
++    rtxt(c, cx[2], y, F_S, FT_GREY, "prąd");
++    rtxt(c, cx[3], y, F_S, FT_GREY, "moc");
++    rtxt(c, cx[4], y, F_S, FT_GREY, "dziś");
++    const uint8_t n = d.mpptCount > 8 ? 8 : d.mpptCount;
++    const int rh = n > 6 ? 23 : 28;
++    y += 6;
++    for (uint8_t k = 0; k < n; k++) {
++        const FdMppt& m = d.mppt[k];
++        const int ry = y + k * rh;
++        if (k & 1) box(c, 6, ry, W - 12, rh, FT_CARD);
++        const int by = ry + rh / 2 + 5;
++        if (d.multiInverter) snprintf(b, sizeof(b), "%u.%u", m.inv, m.ch);
++        else snprintf(b, sizeof(b), "MPPT %u", m.ch);
++        txt(c, cx[0], by, F_RB, FT_ORANGE, b);
++        if (m.reachable) {
++            fnum(t, sizeof(t), m.u, 1); snprintf(b, sizeof(b), "%s V", t); rtxt(c, cx[1], by, F_R, FT_WHITE, b);
++            fnum(t, sizeof(t), m.i, 2); snprintf(b, sizeof(b), "%s A", t); rtxt(c, cx[2], by, F_R, FT_WHITE, b);
++            snprintf(b, sizeof(b), "%.0f W", m.p); rtxt(c, cx[3], by, F_RB, FT_ORANGE, b);
++        } else {
++            rtxt(c, cx[3], by, F_R, FT_GREY, "brak odczytu");
++        }
++        fkwh(b, sizeof(b), m.yd / 1000.0f);
++        rtxt(c, cx[4], by, F_R, FT_YELLOW, b);
++    }
++}
++
++static void pagePanels(FtCanvas& c, const FdData& d)
++{
++    char b[32];
++    int y = 40;
++    const int rowH = 23;
++    for (uint8_t k = 0; k < d.mpptCount && y + rowH <= H; k++) {
++        const FdMppt& m = d.mppt[k];
++        for (uint8_t j = 0; j < m.panelCount && j < 2 && y + rowH <= H; j++, y += rowH) {
++            const FdPanel& p = m.panel[j];
++            if (d.multiInverter) snprintf(b, sizeof(b), "%u.%u", m.inv, m.ch);
++            else snprintf(b, sizeof(b), "%u", m.ch);
++            txt(c, 12, y + 16, F_SB, FT_ORANGE, b);
++            char nm[12];
++            strncpy(nm, p.name, sizeof(nm) - 1);
++            nm[sizeof(nm) - 1] = 0;
++            txt(c, 40, y + 16, F_R, FT_WHITE, nm);
++            // bar: share of the panel's peak power
++            const int bx = 128, bw = 120, bh = 10, byy = y + 7;
++            rbox(c, bx, byy, bw, bh, 5, FT_CARD);
++            if (m.reachable && p.wp > 0 && p.p > 0) {
++                float f = p.p / p.wp;
++                if (f > 1) f = 1;
++                const int fw = (int)lroundf(bw * f);
++                if (fw >= 2) rbox(c, bx, byy, fw < 10 ? 10 : fw, bh, 5, FT_ORANGE);
++            }
++            if (m.reachable) snprintf(b, sizeof(b), "~%.0f W", p.p); else snprintf(b, sizeof(b), "-");
++            rtxt(c, W - 12, y + 16, F_RB, FT_WHITE, b);
++        }
++        if (m.panelCount == 0) {
++            snprintf(b, sizeof(b), "%u", m.ch);
++            txt(c, 12, y + 16, F_SB, FT_ORANGE, b);
++            txt(c, 40, y + 16, F_R, FT_GREY, "brak danych paneli");
++            y += rowH;
++        }
++    }
++}
++
++static void pageSolarEdge(FtCanvas& c, const FdData& d)
++{
++    char b[32], t[16];
++    if (!d.seValid) {
++        rbox(c, 10, 70, W - 20, 90, 10, FT_CARD);
++        ctxt(c, W / 2, 108, F_L, FT_RED, "Brak połączenia z falownikiem");
++        ctxt(c, W / 2, 134, F_R, FT_GREY, "Sprawdź IP, port i Modbus w ustawieniach");
++        return;
++    }
++    const char* u;
++    txt(c, 12, 52, F_R, FT_GREY, "Moc AC");
++    fpowSplit(b, sizeof(b), &u, d.seW);
++    bigValue(c, 10, 92, F_BIG2, FT_BLUE, b, u, FT_GREY);
++    rbox(c, 204, 40, 106, 56, 10, FT_YELLOW);
++    txt(c, 214, 58, F_RB, FT_DARK, "Dziś");
++    fkwh(b, sizeof(b), d.todaySe);
++    txt(c, 214, 84, F_L, FT_DARK, b);
++
++    const int y0 = 124, rh = 27, xm = W / 2;
++    kvRow(c, 12, xm - 10, y0, "Stan", d.seStatus, d.seW >= 1 ? FT_GREEN : FT_WHITE);
++    fkwh(b, sizeof(b), d.seTotalKWh);
++    kvRow(c, 12, xm - 10, y0 + rh, "Łącznie", b);
++    fnum(t, sizeof(t), d.seTemp, 0); snprintf(b, sizeof(b), "%s °C", t);
++    kvRow(c, xm + 10, W - 12, y0, "Radiator", b);
++    fnum(t, sizeof(t), d.seDcV, 0); snprintf(b, sizeof(b), "%s V", t);
++    kvRow(c, xm + 10, W - 12, y0 + rh, "Napięcie DC", b);
++    kvRow(c, 12, W - 12, y0 + 2 * rh, "Model", d.seModel[0] ? d.seModel : "-");
++}
++
++static void pageHistory(FtCanvas& c, const FdData& d)
++{
++    const int cx[4] = { 12, 168, 234, 310 }; // label | Hoymiles(r) | SolarEdge(r) | Suma(r)
++    const int sumX = 248;
++    int y = 50;
++    rtxt(c, cx[1], y, F_S, FT_ORANGE, "Hoymiles");
++    rtxt(c, cx[2], y, F_S, FT_BLUE, "SolarEdge");
++    rbox(c, sumX, 38, W - 6 - sumX, 196, 8, FT_YELLOW);
++    rtxt(c, cx[3], y, F_SB, FT_DARK, "Suma");
++    struct R { const char* k; float h, s; } r[4] = {
++        { "Wczoraj", d.hasYesterday ? d.yHoy : -1, d.hasYesterday ? d.ySe : -1 },
++        { "Ten miesiąc", d.mHoy, d.mSe },
++        { "Ten rok", d.yrHoy, d.yrSe },
++        { "Łącznie", d.ltHoy, d.ltSe },
++    };
++    for (int i = 0; i < 4; i++) {
++        const int ry = 60 + i * 43;
++        if (i) hline(c, 12, ry, sumX - 20, FT_LINE);
++        txt(c, cx[0], ry + 27, F_R, FT_WHITE, r[i].k);
++        char n[16];
++        const char* u;
++        fkwhSplit(n, sizeof(n), &u, r[i].h);
++        rtxt(c, cx[1], ry + 20, F_R, FT_WHITE, n);
++        rtxt(c, cx[1], ry + 34, F_S, FT_GREY, u);
++        fkwhSplit(n, sizeof(n), &u, d.seConfigured ? r[i].s : -1);
++        rtxt(c, cx[2], ry + 20, F_R, FT_WHITE, n);
++        rtxt(c, cx[2], ry + 34, F_S, FT_GREY, u);
++        fkwhSplit(n, sizeof(n), &u, sum2(r[i].h, r[i].s));
++        rtxt(c, cx[3], ry + 20, F_RB, FT_DARK, n);
++        rtxt(c, cx[3], ry + 34, F_S, FT_DARK, u);
++    }
++}
++
++static void pageStatus(FtCanvas& c, const FdData& d)
++{
++    char b[48];
++    const int y0 = 56, rh = 34;
++    kvRow(c, 12, W - 12, y0, "Adres IP", d.ip[0] ? d.ip : "brak", FT_CYAN);
++    kvRow(c, 12, W - 12, y0 + rh, "Sieć", d.net);
++    kvRow(c, 12, W - 12, y0 + 2 * rh, "Karta SD", d.sd);
++    snprintf(b, sizeof(b), "%u z %u online", d.invOnline, d.invTotal);
++    kvRow(c, 12, W - 12, y0 + 3 * rh, "Inwertery Hoymiles", b, d.invOnline ? FT_GREEN : FT_RED);
++    const uint32_t dd = d.uptimeS / 86400, hh = (d.uptimeS / 3600) % 24, mm = (d.uptimeS / 60) % 60;
++    if (dd) snprintf(b, sizeof(b), "%u d %u h %u min", (unsigned)dd, (unsigned)hh, (unsigned)mm);
++    else snprintf(b, sizeof(b), "%u h %u min", (unsigned)hh, (unsigned)mm);
++    kvRow(c, 12, W - 12, y0 + 4 * rh, "Czas pracy", b, FT_WHITE, false);
++    if (d.timeValid) ctxt(c, W / 2, 232, F_S, FT_GREY, d.date);
++}
++
++// ---------------------------------------------------------------- chart
++static void pageChart(FtCanvas& c, const FdData& d)
++{
++    const int X0 = 44, X1 = W - 10, TOP = 70, BOT = 206;
++    const int PW = X1 - X0 + 1;
++    const int per = 12;
++    int first = -1, last = -1, peakI = -1;
++    uint32_t peak = 0;
++    float wh = 0;
++    for (int i = 0; i < FD_CURVE_SLOTS; i++) {
++        const uint16_t a = d.curveHoy[i], s = d.curveSe[i];
++        if (a == FD_CURVE_NONE && s == FD_CURVE_NONE) continue;
++        const uint32_t t = (a == FD_CURVE_NONE ? 0 : a) + (s == FD_CURVE_NONE ? 0 : s);
++        if (t > 0) { if (first < 0) first = i; last = i; }
++        if (t > peak) { peak = t; peakI = i; }
++        wh += t * 5.0f / 60.0f;
++    }
++    int h0 = 6, h1 = 20;
++    if (first >= 0) {
++        h0 = first / per - 1; if (h0 < 0) h0 = 0;
++        h1 = (last + per) / per + 1; if (h1 > 24) h1 = 24;
++        if (h1 - h0 < 8) { int m = (h0 + h1) / 2; h0 = m - 4; if (h0 < 0) h0 = 0; h1 = h0 + 8; if (h1 > 24) { h1 = 24; h0 = 16; } }
++    }
++    const int s0 = h0 * per, sN = (h1 - h0) * per;
++
++    float ymax = 1000;
++    if (peak > 0) {
++        const float r = peak * 1.05f;
++        const float e = powf(10.0f, floorf(log10f(r)));
++        static const float F[] = { 1, 1.5f, 2, 2.5f, 3, 4, 5, 6, 8, 10 };
++        for (float f : F) if (f * e >= r) { ymax = f * e; break; }
++    }
++
++    // info line
++    char b[32], n[16];
++    txt(c, 12, 52, F_S, FT_GREY, "Szczyt");
++    fpow(b, sizeof(b), (float)peak);
++    int x = txt(c, 50, 52, F_RB, FT_WHITE, peak ? b : "-");
++    if (peakI >= 0 && peak) {
++        snprintf(b, sizeof(b), "o %02d:%02d", peakI / 12, (peakI % 12) * 5);
++        txt(c, x + 6, 52, F_S, FT_GREY, b);
++    }
++    fkwh(n, sizeof(n), (d.todayHoy >= 0 || d.todaySe >= 0) ? sum2(d.todayHoy, d.todaySe) : wh / 1000.0f);
++    snprintf(b, sizeof(b), "Dziś %s", n);
++    const int bw = width(c, F_RB, b) + 16;
++    rbox(c, W - 10 - bw, 38, bw, 20, 10, FT_YELLOW);
++    txt(c, W - 2 - bw, 53, F_RB, FT_DARK, b);
++
++    // grid lines + scale labels
++    for (int k = 0; k <= 4; k++) {
++        const int y = BOT - (BOT - TOP) * k / 4;
++        for (int gx = X0; gx <= X1; gx += 3) pix(c, gx, y, FT_LINE);
++        if (k == 0) continue;
++        const float v = ymax * k / 4;
++        if (ymax >= 1000) {
++            fnum(b, sizeof(b), v / 1000.0f, fabsf(v / 1000.0f - roundf(v / 1000.0f)) < 0.01f ? 0 : 1);
++        } else snprintf(b, sizeof(b), "%.0f", v);
++        rtxt(c, X0 - 6, y + 4, F_S, FT_GREY, b);
++        if (k == 4) txt(c, X0 + 4, y + 13, F_S, FT_GREY, ymax >= 1000 ? "kW" : "W");
++    }
++
++    // stacked area: Hoymiles (orange) below, SolarEdge (blue) on top, bright outlines
++    int prevH = -1, prevT = -1;
++    for (int i = 0; i < PW; i++) {
++        const int sa = s0 + i * sN / PW;
++        int se_ = s0 + (i + 1) * sN / PW; if (se_ <= sa) se_ = sa + 1;
++        if (sa >= FD_CURVE_SLOTS) break;
++        if (sa > (int)d.curveSlot) { prevH = prevT = -1; continue; }
++        uint32_t ha = 0, sa2 = 0; int cnt = 0;
++        for (int k = sa; k < se_ && k < FD_CURVE_SLOTS; k++) {
++            if (d.curveHoy[k] == FD_CURVE_NONE && d.curveSe[k] == FD_CURVE_NONE) continue;
++            ha += d.curveHoy[k] == FD_CURVE_NONE ? 0 : d.curveHoy[k];
++            sa2 += d.curveSe[k] == FD_CURVE_NONE ? 0 : d.curveSe[k];
++            cnt++;
++        }
++        if (!cnt) { prevH = prevT = -1; continue; }
++        const float hv = (float)ha / cnt, sv = (float)sa2 / cnt;
++        const int yh = BOT - (int)lroundf((BOT - TOP) * fminf(hv, ymax) / ymax);
++        const int yt = BOT - (int)lroundf((BOT - TOP) * fminf(hv + sv, ymax) / ymax);
++        const int px = X0 + i;
++        if (yh < BOT) vline(c, px, yh, BOT - yh, FT_ORANGE_D);
++        if (yt < yh) vline(c, px, yt, yh - yt, FT_BLUE_D);
++        auto edge = [&](int prev, int cur, uint8_t col) {
++            if (prev >= 0) {
++                const int a = prev < cur ? prev : cur, z = prev < cur ? cur : prev;
++                vline(c, px, a, z - a + 1, col);
++            } else pix(c, px, cur, col);
++        };
++        if (d.seConfigured && yt < yh) edge(prevT, yt, FT_BLUE);
++        edge(prevH, yh, FT_ORANGE);
++        if (d.seConfigured && yt >= yh) edge(prevT, yt, FT_BLUE);
++        prevH = yh;
++        prevT = yt;
++    }
++
++    // axis + hours
++    hline(c, X0, BOT, PW, FT_GREY);
++    const int span = h1 - h0, every = span > 12 ? 3 : 2;
++    for (int hh = h0; hh <= h1; hh++) {
++        const int gx = X0 + (hh - h0) * (PW - 1) / span;
++        vline(c, gx, BOT, 3, FT_GREY);
++        if (hh % every == 0) {
++            snprintf(b, sizeof(b), "%d", hh);
++            ctxt(c, gx, BOT + 15, F_S, FT_GREY, b);
++        }
++    }
++    // now marker
++    if (d.timeValid && (int)d.curveSlot >= s0 && (int)d.curveSlot <= s0 + sN) {
++        const int gx = X0 + ((int)d.curveSlot - s0) * PW / sN;
++        for (int y = TOP; y < BOT; y += 4) vline(c, gx, y, 2, FT_YELLOW);
++    }
++    // legend
++    int lx = 12;
++    box(c, lx, 228, 10, 10, FT_ORANGE);
++    lx = txt(c, lx + 14, 237, F_S, FT_WHITE, "Hoymiles") + 14;
++    if (d.seConfigured) {
++        box(c, lx, 228, 10, 10, FT_BLUE);
++        txt(c, lx + 14, 237, F_S, FT_WHITE, "SolarEdge");
++    }
++    if (first < 0) {
++        rbox(c, X0 + 30, 116, PW - 60, 40, 10, FT_CARD);
++        ctxt(c, X0 + PW / 2, 141, F_RB, FT_GREY, d.timeValid ? "Dziś brak produkcji" : "Brak czasu (NTP)");
++    }
++}
++
++// ---------------------------------------------------------------- public
++void ftRenderPage(FtCanvas& c, const FdData& d, uint8_t page, uint8_t no, uint8_t cnt, bool autoRotate)
++{
++    u8g2_SetFontMode(c.u, 1);
++    u8g2_SetDrawColor(c.u, 1);
++    u8g2_ClearBuffer(c.u);
++    c.ink = FT_WHITE;
++    memset(c.fb, FT_BG, W * H);
++    header(c, d, page, no, cnt, autoRotate);
++    switch (page) {
++    case FD_PAGE_POWER: pagePower(c, d); break;
++    case FD_PAGE_CHART: pageChart(c, d); break;
++    case FD_PAGE_GRID: pageGrid(c, d); break;
++    case FD_PAGE_MPPT: pageMppt(c, d); break;
++    case FD_PAGE_PANELS: pagePanels(c, d); break;
++    case FD_PAGE_SOLAREDGE: pageSolarEdge(c, d); break;
++    case FD_PAGE_HISTORY: pageHistory(c, d); break;
++    case FD_PAGE_STATUS: pageStatus(c, d); break;
++    }
++    ftFlushLayer(c);
++}
++
++void ftRenderOverlay(FtCanvas& c, const char* l1, const char* l2)
++{
++    const int w = 280, h = l2 ? 84 : 60, x = (W - w) / 2, y = 34 + (H - 34 - h) / 2;
++    rbox(c, x - 2, y - 2, w + 4, h + 4, 12, FT_YELLOW);
++    rbox(c, x, y, w, h, 10, FT_HEAD);
++    ctxt(c, W / 2, y + (l2 ? 34 : 37), F_L, FT_WHITE, l1);
++    if (l2) ctxt(c, W / 2, y + 62, F_R, FT_GREY, l2);
++    ftFlushLayer(c);
++}
+diff --git a/src/WebApi_sd.cpp b/src/WebApi_sd.cpp
+index 77dbbdb3..f0f45aae 100644
+--- a/src/WebApi_sd.cpp
++++ b/src/WebApi_sd.cpp
+@@ -230,6 +230,36 @@ void WebApiSdClass::onDisplayPost(AsyncWebServerRequest* request)
+     c.contrast = constrain((int)(root["contrast"] | (int)c.contrast), 0, 255);
+     c.flip = root["flip"] | c.flip;
+     c.pages = (uint8_t)(root["pages"] | (int)c.pages);
++    if (root["type"].is<int>()) c.type = root["type"].as<int>() == FD_TYPE_ST7789 ? FD_TYPE_ST7789 : FD_TYPE_SSD1322;
++    c.tftInvert = root["tft_invert"] | c.tftInvert;
++    c.tftBgr = root["tft_bgr"] | c.tftBgr;
++    // pins: -1 = not connected, otherwise only free GPIOs, no pin used twice
++    String pinErr;
++    auto pin = [&](const char* key, int8_t cur) -> int8_t {
++        if (!root[key].is<int>()) return cur;
++        const int p = root[key].as<int>();
++        if (p < 0) return -1;
++        if (!FusionDisplayClass::pinAllowed(p)) {
++            pinErr = String("GPIO") + p + " nie jest wolny";
++            return cur;
++        }
++        return p;
++    };
++    c.blPin = pin("bl_pin", c.blPin);
++    c.encA = pin("enc_a", c.encA);
++    c.encB = pin("enc_b", c.encB);
++    c.encSw = pin("enc_sw", c.encSw);
++    const int8_t used[4] = { c.blPin, c.encA, c.encB, c.encSw };
++    for (int i = 0; i < 4; i++)
++        for (int j = i + 1; j < 4; j++)
++            if (used[i] >= 0 && used[i] == used[j]) pinErr = String("GPIO") + (int)used[i] + " wybrany dwa razy";
++    if (pinErr.length()) {
++        auto& err = response->getRoot();
++        err["type"] = "warning";
++        err["message"] = pinErr;
++        WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++        return;
++    }
+     const bool ok = FusionDisplay.setConfig(c);
+     auto& retMsg = response->getRoot();
+     retMsg["type"] = ok ? "success" : "warning";
+-- 
+2.43.0
+
