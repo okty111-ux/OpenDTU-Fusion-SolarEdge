@@ -1,0 +1,56 @@
+From af85258ad83bde33387bb9fb86fe992f66273838 Mon Sep 17 00:00:00 2001
+From: Okty <okty@localhost>
+Date: Fri, 13 Nov 2026 09:03:13 +0100
+Subject: [PATCH] Fix /api/history JSON: copy char-array strings (ArduinoJson
+ 7.4 keeps const char[N] by pointer)
+
+recToJson() received a const EnergyRecord&, so r.key was stored by pointer with its
+full array length. For today's record and the month/year totals the record is a
+temporary, so the pointer dangled by the time the response was serialized and the
+JSON came out corrupted - the dashboard showed 'brak polaczenia z DTU'.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ src/EnergyHistory.cpp | 4 ++--
+ src/PowerLog.cpp      | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/EnergyHistory.cpp b/src/EnergyHistory.cpp
+index 86d33e4b..b8ac8e8a 100644
+--- a/src/EnergyHistory.cpp
++++ b/src/EnergyHistory.cpp
+@@ -175,7 +175,7 @@ void EnergyHistoryClass::rollover(const char* newDate)
+ // ------------------------------------------------------------- storage
+ static void recToJson(JsonObject o, const EnergyRecord& r, bool peaks)
+ {
+-    o["k"] = r.key;
++    o["k"] = static_cast<const char*>(r.key); // copy: ArduinoJson keeps const char[N] by pointer
+     o["h"] = serialized(String(r.hoy, 3));
+     o["s"] = serialized(String(r.se, 3));
+     if (r.exp >= 0) o["e"] = serialized(String(r.exp, 3));
+@@ -204,7 +204,7 @@ bool EnergyHistoryClass::save()
+     JsonDocument doc;
+     doc["v"] = 1;
+     auto cur = doc["cur"].to<JsonObject>();
+-    cur["date"] = _date;
++    cur["date"] = static_cast<const char*>(_date);
+     auto putC = [](JsonObject o, const Counters& c) {
+         o["h"] = serialized(String(c.hoy, 3));
+         o["s"] = serialized(String(c.se, 3));
+diff --git a/src/PowerLog.cpp b/src/PowerLog.cpp
+index 110fe34d..162415b5 100644
+--- a/src/PowerLog.cpp
++++ b/src/PowerLog.cpp
+@@ -138,7 +138,7 @@ void PowerLogClass::toJson(JsonObject root, uint8_t which)
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+     const PowerDay& d = which ? _yesterday : _today;
+-    root["date"] = d.date;
++    root["date"] = static_cast<const char*>(d.date); // copy, see EnergyHistory::recToJson
+     root["step_min"] = POWERLOG_STEP_MIN;
+     if (!which) root["slot"] = _slot;
+     auto h = root["hoy"].to<JsonArray>();
+-- 
+2.43.0
+
