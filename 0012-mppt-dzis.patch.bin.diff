@@ -1,0 +1,197 @@
+From 8eb1fee77f76581255a741700d520dcd69a27938 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 17:26:04 +0100
+Subject: [PATCH] MPPT today: derive from the total counter (MIT sends no
+ per-channel daily yield)
+
+The MIT-5000-8T always reports 0 in the per-channel YieldDay field, so the
+MPPT and panel 'today' values stayed 0. Today = YieldTotal now - YieldTotal at
+the first reading of the day; start values kept in /mppt_day.json so a restart
+during the day keeps them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HoymilesChannels.h | 16 ++++++-
+ src/HoymilesChannels.cpp   | 87 +++++++++++++++++++++++++++++++++++++-
+ src/main.cpp               |  2 +-
+ 3 files changed, 102 insertions(+), 3 deletions(-)
+
+diff --git a/include/HoymilesChannels.h b/include/HoymilesChannels.h
+index 581a0b68..d629a260 100644
+--- a/include/HoymilesChannels.h
++++ b/include/HoymilesChannels.h
+@@ -10,11 +10,17 @@
+  * where w_k = Vmp_k / sum(Vmp) (series, if Vmp of all panels given) or
+  *       w_k = Wp_k  / sum(Wp)  (otherwise).
+  * Config: LittleFS /mppt.json
++ *
++ * Today's yield per MPPT: the MIT-5000-8T sends no per-channel daily yield
++ * (field is always 0), so it is derived as YieldTotal(now) - YieldTotal(at the
++ * start of the day). The start values are kept in /mppt_day.json.
+  */
+ #pragma once
+ 
+ #include <Arduino.h>
+ #include <ArduinoJson.h>
++#include <TaskSchedulerDeclarations.h>
++#include <map>
+ #include <mutex>
+ #include <vector>
+ 
+@@ -54,7 +60,8 @@ struct MpptReading {
+ 
+ class HoymilesChannelsClass {
+ public:
+-    void init();
++    HoymilesChannelsClass();
++    void init(Scheduler& scheduler);
+     std::vector<MpptReading> read();
+     void toJson(JsonArray arr);
+     void configToJson(JsonObject root);
+@@ -64,7 +71,14 @@ private:
+     MpptCfg getCfg(const String& serial, uint8_t ch);
+     void load();
+     bool save();
++    void dayTick();
++    void loadDayBase();
++    void saveDayBase();
+     std::mutex _mutex;
++    Task _dayTask;
++    std::mutex _dayMutex;
++    std::map<String, float> _dayBase; // "<serial>:<channel>" -> YieldTotal (kWh) at day start
++    char _day[11] = "";
+     JsonDocument _cfg; // { "<serial>": [ {series, panels:[{name,wp,vmp}]} x channels ] }
+ };
+ 
+diff --git a/src/HoymilesChannels.cpp b/src/HoymilesChannels.cpp
+index 3423016b..e45c8adc 100644
+--- a/src/HoymilesChannels.cpp
++++ b/src/HoymilesChannels.cpp
+@@ -7,9 +7,12 @@
+ #undef TAG
+ static const char* TAG = "mppt";
+ static const char* CFG_FILE = "/mppt.json";
++static const char* DAY_FILE = "/mppt_day.json";
+ 
+ HoymilesChannelsClass HoymilesChannels;
+ 
++static String serialStr(uint64_t s);
++
+ uint8_t MpptCfg::count() const
+ {
+     uint8_t n = 0;
+@@ -17,7 +20,82 @@ uint8_t MpptCfg::count() const
+     return n;
+ }
+ 
+-void HoymilesChannelsClass::init() { load(); }
++HoymilesChannelsClass::HoymilesChannelsClass()
++    : _dayTask(30 * TASK_SECOND, TASK_FOREVER, std::bind(&HoymilesChannelsClass::dayTick, this))
++{
++}
++
++void HoymilesChannelsClass::init(Scheduler& scheduler)
++{
++    load();
++    loadDayBase();
++    scheduler.addTask(_dayTask);
++    _dayTask.enable();
++}
++
++static String dayKey(const String& serial, uint8_t ch) { return serial + ":" + ch; }
++
++void HoymilesChannelsClass::loadDayBase()
++{
++    std::lock_guard<std::mutex> lock(_dayMutex);
++    File f = LittleFS.open(DAY_FILE, "r");
++    if (!f) return;
++    JsonDocument doc;
++    if (!deserializeJson(doc, f)) {
++        strlcpy(_day, doc["d"] | "", sizeof(_day));
++        for (JsonPairConst kv : doc["b"].as<JsonObjectConst>()) {
++            _dayBase[String(kv.key().c_str())] = kv.value().as<float>();
++        }
++    }
++    f.close();
++}
++
++void HoymilesChannelsClass::saveDayBase()
++{
++    JsonDocument doc;
++    doc["d"] = static_cast<const char*>(_day);
++    auto b = doc["b"].to<JsonObject>();
++    for (auto& kv : _dayBase) b[kv.first] = kv.second;
++    File f = LittleFS.open(DAY_FILE, "w");
++    if (!f) return;
++    serializeJson(doc, f);
++    f.close();
++}
++
++// every 30 s: new day -> forget the start values; first reading of a channel
++// today -> remember its YieldTotal as the start value
++void HoymilesChannelsClass::dayTick()
++{
++    struct tm t;
++    if (!getLocalTime(&t, 5) || t.tm_year < (2024 - 1900)) return;
++    char today[11];
++    strftime(today, sizeof(today), "%Y-%m-%d", &t);
++
++    std::lock_guard<std::mutex> lock(_dayMutex);
++    bool dirty = false;
++    if (strcmp(today, _day) != 0) {
++        strlcpy(_day, today, sizeof(_day));
++        _dayBase.clear();
++        dirty = true;
++    }
++    for (uint8_t i = 0; i < Hoymiles.getNumInverters(); i++) {
++        auto inv = Hoymiles.getInverterByPos(i);
++        if (!inv || !inv->isReachable()) continue;
++        auto stats = inv->Statistics();
++        const String ser = serialStr(inv->serial());
++        for (auto& c : stats->getChannelsByType(TYPE_DC)) {
++            const float yt = stats->getChannelFieldValue(TYPE_DC, c, FLD_YT);
++            if (yt <= 0) continue; // no data received yet
++            const String k = dayKey(ser, static_cast<uint8_t>(c));
++            auto it = _dayBase.find(k);
++            if (it == _dayBase.end() || yt < it->second) { // new channel or counter reset
++                _dayBase[k] = yt;
++                dirty = true;
++            }
++        }
++    }
++    if (dirty) saveDayBase();
++}
+ 
+ void HoymilesChannelsClass::load()
+ {
+@@ -85,6 +163,13 @@ std::vector<MpptReading> HoymilesChannelsClass::read()
+             r.p = stats->getChannelFieldValue(TYPE_DC, c, FLD_PDC);
+             r.yieldDay = stats->getChannelFieldValue(TYPE_DC, c, FLD_YD);
+             r.yieldTotal = stats->getChannelFieldValue(TYPE_DC, c, FLD_YT);
++            if (r.yieldDay <= 0 && r.yieldTotal > 0) { // MIT: derive from the total counter
++                std::lock_guard<std::mutex> lock(_dayMutex);
++                auto it = _dayBase.find(dayKey(ser, static_cast<uint8_t>(c)));
++                if (it != _dayBase.end() && r.yieldTotal >= it->second) {
++                    r.yieldDay = (r.yieldTotal - it->second) * 1000.0f;
++                }
++            }
+ 
+             const MpptCfg mc = getCfg(ser, static_cast<uint8_t>(c));
+             r.series = mc.series;
+diff --git a/src/main.cpp b/src/main.cpp
+index f273ee04..0c10436c 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -143,7 +143,7 @@ void setup()
+     SolarEdge.init(scheduler);
+ 
+     // Persistent daily/monthly/yearly energy history
+-    HoymilesChannels.init();
++    HoymilesChannels.init(scheduler);
+     EnergyHistory.init(scheduler);
+     PowerLog.init(scheduler);
+ 
+-- 
+2.43.0
+
