@@ -1,0 +1,78 @@
+From 9e7d984d03f97a550d9adee112783e2a2c147711 Mon Sep 17 00:00:00 2001
+From: Okty <okty@localhost>
+Date: Fri, 13 Nov 2026 10:06:41 +0100
+Subject: [PATCH] Fusion update: follow GitHub download redirects
+
+---
+ src/FusionUpdate.cpp | 41 ++++++++++++++++++++++-------------------
+ 1 file changed, 22 insertions(+), 19 deletions(-)
+
+diff --git a/src/FusionUpdate.cpp b/src/FusionUpdate.cpp
+index de9251d6..ff5754d1 100644
+--- a/src/FusionUpdate.cpp
++++ b/src/FusionUpdate.cpp
+@@ -39,19 +39,21 @@ static const char* stateName(FuState s)
+ // ---------- small esp_http_client helpers (TLS via the IDF certificate bundle)
+ static esp_http_client_handle_t openUrl(const String& url, int& status, int64_t& len, const char* accept)
+ {
+-    String cur = url;
++    esp_http_client_config_t cfg = {};
++    cfg.url = url.c_str();
++    cfg.crt_bundle_attach = esp_crt_bundle_attach;
++    cfg.timeout_ms = 15000;
++    cfg.buffer_size = 2048;
++    cfg.buffer_size_tx = 2048; // the signed release-asset URLs are long
++    cfg.disable_auto_redirect = true;
++    cfg.user_agent = "OpenDTU-Fusion";
++    esp_http_client_handle_t c = esp_http_client_init(&cfg);
++    if (!c) {
++        status = -1;
++        return nullptr;
++    }
++    if (accept) esp_http_client_set_header(c, "Accept", accept);
+     for (int hop = 0; hop < 6; hop++) {
+-        esp_http_client_config_t cfg = {};
+-        cfg.url = cur.c_str();
+-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+-        cfg.timeout_ms = 15000;
+-        cfg.buffer_size = 2048;
+-        cfg.buffer_size_tx = 1024;
+-        cfg.disable_auto_redirect = true;
+-        cfg.user_agent = "OpenDTU-Fusion";
+-        esp_http_client_handle_t c = esp_http_client_init(&cfg);
+-        if (!c) return nullptr;
+-        if (accept) esp_http_client_set_header(c, "Accept", accept);
+         if (esp_http_client_open(c, 0) != ESP_OK) {
+             esp_http_client_cleanup(c);
+             status = -1;
+@@ -60,20 +62,21 @@ static esp_http_client_handle_t openUrl(const String& url, int& status, int64_t&
+         len = esp_http_client_fetch_headers(c);
+         status = esp_http_client_get_status_code(c);
+         if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+-            char* loc = nullptr;
+-            esp_http_client_get_header(c, "Location", &loc);
+-            String next = loc ? String(loc) : String();
+-            esp_http_client_close(c);
+-            esp_http_client_cleanup(c);
+-            if (next.isEmpty()) {
++            // GitHub release downloads redirect to release-assets.githubusercontent.com.
++            // esp_http_client_get_header() only sees *request* headers, so let the client
++            // take the Location of the response itself and reconnect.
++            if (esp_http_client_set_redirection(c) != ESP_OK) {
++                esp_http_client_close(c);
++                esp_http_client_cleanup(c);
+                 status = -2;
+                 return nullptr;
+             }
+-            cur = next;
++            esp_http_client_close(c);
+             continue;
+         }
+         return c;
+     }
++    esp_http_client_cleanup(c);
+     status = -3;
+     return nullptr;
+ }
+-- 
+2.43.0
