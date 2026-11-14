@@ -1,0 +1,711 @@
+From 5d79ea02a79cef73a9c76a79365766814f7f2550 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 16:24:55 +0100
+Subject: [PATCH] Roof and terrace drawings like the real house
+
+Card 'Dach i taras': aerial view of the hip roof (own half on the left with the
+SolarEdge panels and their live power, neighbour's half with grey panels on the
+right) and the terrace lean-to roof with the Hoymiles panels, seen from the
+garden. Tap a panel for its details.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 97 ++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 72 insertions(+), 25 deletions(-)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index f0030aa7..f7e740ce 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -204,6 +204,16 @@ section.chart{overflow:visible}
+ .hero .rlab,.hero .rval{text-anchor:middle;font-weight:700;fill:var(--rf)}.hero .rlab{font-size:7px;opacity:.8}.hero .rval{font-size:9px}
+ .hero .rlab.lt,.hero .rval.lt{fill:#fff;paint-order:stroke;stroke:#0b1d5c;stroke-width:2px;stroke-opacity:.45}
+ .hero.night .rlab:not(.lt),.hero.night .rval:not(.lt){fill:#e6ebff}
++
++.rsvg{width:100%;height:auto;display:block;border-radius:10px}
++.rsvg .flat{fill:#cfd4d8}.rsvg .par{fill:none;stroke:#8a9097;stroke-width:6}.rsvg .f1{fill:#3a3f46}.rsvg .f2{fill:#2b3037}.rsvg .f3{fill:#33383f}
++.rsvg .rdg{stroke:#555c66;stroke-width:3}.rsvg .chim{fill:#e7e7e2;stroke:#9aa0a6}.rsvg .div{stroke:#fff;stroke-width:1.5;stroke-dasharray:6 5;opacity:.7}
++.rsvg .tag{fill:#3b4350;font-size:13px;font-weight:600}
++.rsvg .sp{cursor:pointer}.rsvg .spb{fill:#1d3f8f;stroke:#c8d6ff;stroke-width:1.2}.rsvg .sp.nb{cursor:default}.rsvg .sp.nb .spb{fill:#15181d;stroke:#4b525c}
++.rsvg .sp text{font-weight:700;text-anchor:middle;pointer-events:none}.rsvg .sp.sel .spb{stroke:#fff;stroke-width:3}
++.rsvg .wall{fill:#eceae4}.rsvg .wood{fill:#8a5a3b}.rsvg .wnd{fill:#9ec3df;stroke:#6b4430;stroke-width:3}.rsvg .rail{stroke:#9aa3ab;stroke-width:1.5}
++.rsvg .lroof{fill:#5b6168}.rsvg .fascia{fill:#4a2f22}.rsvg .beam{fill:#6b4430}.rsvg .brick{fill:#9b4a35}
++.rsvg .curt{fill:#4a2a20}.rsvg .glass{fill:#c9d2d6;opacity:.55}.rsvg .door{fill:#f5f2ea}.rsvg .grass{fill:#6cab55}
+ </style>
+ </head>
+ <body>
+@@ -250,7 +260,7 @@ section.chart{overflow:visible}
+     <div class="ch" id="chart"></div><div class="chs" id="chS"></div>
+   </section>
+ 
+-  <section id="dachy" style="display:none"><h3>Dachy · panele na żywo</h3>
++  <section id="dachy" style="display:none"><h3>Dach i taras · panele na żywo</h3>
+     <div class="roofs" id="roofs"></div>
+     <div class="rleg"><span>0%</span><i></i><span>moc nominalna</span><span class="mu" id="rNote"></span></div>
+     <div class="rdet mu" id="rDet">Dotknij panelu, aby zobaczyć szczegóły.</div>
+@@ -328,35 +338,72 @@ function mppt(h){
+ const RP={};
+ function heat(f){f=Math.max(0,Math.min(1,f||0));const c=[[30,41,59],[29,78,216],[14,165,233],[250,204,21]];const x=f*3,i=Math.min(2,Math.floor(x)),t=x-i;
+   return 'rgb('+c[i].map((v,k)=>Math.round(v+(c[i+1][k]-v)*t)).join(',')+')';}
+-function roofHtml(id,title,sub,groups,col){
+-  const n=groups.reduce((a,g)=>a+g.p.length,0),tot=groups.reduce((a,g)=>a+g.p.reduce((b,x)=>b+(x.w||0),0),0);
+-  let h=`<div class="roof"><div class="rhd"><b>${esc(title)}</b><span class="mu">${n} ${n==1?'panel':(n%10>=2&&n%10<=4&&(n%100<10||n%100>=20)?'panele':'paneli')}${sub?' · '+esc(sub):''}</span><span class="rw" style="color:${col}">${w(tot)}</span></div><div class="rsh"><div class="rgr">`;
+-  groups.forEach(g=>{const R=g.p.length<=2?g.p.length:(g.p.length<=6?2:3);
+-    h+=`<div class="rg"><div class="rgp" style="grid-template-rows:repeat(${R},auto)">`;
+-    g.p.forEach((x,k)=>{const key=id+g.l+'_'+k;RP[key]=x;const f=x.wp?x.w/x.wp:0,dark=f<0.45;
+-      h+=`<button class="pv${x.off?' off':''}" style="background-color:${x.off?'':heat(f)};color:${f<0.6?'#f1f5f9':'#1f1700'}" data-k="${esc(key)}" title="${esc(x.n)}">${x.w==null||x.off?'–':Math.round(x.w)}<small>${x.w==null||x.off?'':'W'}</small></button>`;});
+-    h+=`</div><div class="rgl">${esc(g.l)}</div></div>`;});
+-  return h+'</div></div></div>';
++function pvSlot(id,k,x,pts,ctr,ang,fs){ // one clickable panel: x={w,wp,...} or null (neighbour)
++  const own=!!x,f=own&&x.wp&&x.w>0?Math.min(1,x.w/x.wp):0;
++  let o=`<g class="sp${own?'':' nb'}"${own?` data-k="${id}${k}"`:''}><polygon class="spb" points="${pts}"${own&&!x.off?` style="fill:${heat(f)}"`:''}/>`;
++  if(own){RP[id+k]=x;const t=x.off||x.w==null?'–':Math.round(x.w);
++    o+=`<text x="${ctr[0].toFixed(1)}" y="${(ctr[1]+fs*.36).toFixed(1)}" font-size="${fs}"${ang?` transform="rotate(${ang} ${ctr[0].toFixed(1)} ${ctr[1].toFixed(1)})"`:''} style="fill:${f<0.6?'#fff':'#1f1700'}">${t}</text>`;}
++  return o+'</g>';
++}
++function rect(cx,cy,w,h,ang){ // rotated rectangle -> points + centre
++  const a=(ang||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a),P=[[-w/2,-h/2],[w/2,-h/2],[w/2,h/2],[-w/2,h/2]].map(([x,y])=>[cx+x*c-y*s,cy+x*s+y*c]);
++  return {pts:P.map(q=>q[0].toFixed(1)+','+q[1].toFixed(1)).join(' '),ctr:[cx,cy]};
++}
++// aerial view of the roof: left half = own SolarEdge panels, right half = neighbour
++function roofSvg(se){
++  const S=[];
++  // own slots: front slope 2 portrait + 2 landscape, strip along the left hip, one on the back slope
++  S.push([175,140,30,44,0],[208,140,30,44,0],[150,193,50,34,0],[203,193,50,34,0]);
++  const nStrip=Math.max(4,se.length-5),P0=[62,206],P1=[150,104],L=Math.hypot(P1[0]-P0[0],P1[1]-P0[1]),ang=Math.atan2(P1[1]-P0[1],P1[0]-P0[0])*180/Math.PI;
++  for(let i=0;i<nStrip;i++){const t=(i+.5)/nStrip;S.push([P0[0]+(P1[0]-P0[0])*t,P0[1]+(P1[1]-P0[1])*t,L/nStrip-3,26,ang]);}
++  S.push([150,72,46,24,0]);
++  let g=`<rect class="flat" x="4" y="4" width="472" height="292" rx="6"/><rect class="par" x="4" y="4" width="472" height="292" rx="6"/>`+
++    `<polygon class="f1" points="40,50 440,50 310,105 170,105"/><polygon class="f2" points="40,240 440,240 310,105 170,105"/>`+
++    `<polygon class="f3" points="40,50 170,105 40,240"/><polygon class="f3" points="440,50 310,105 440,240"/><line class="rdg" x1="170" y1="105" x2="310" y2="105"/>`;
++  // neighbour panels
++  [[296,132,36,24,0],[284,168,44,28,0],[333,168,44,28,0],[280,206,44,30,0],[328,206,44,30,0],[376,206,44,30,0]].forEach(([x,y,w2,h2,a])=>{const r=rect(x,y,w2,h2,a);g+=pvSlot('',0,null,r.pts);});
++  for(let i=0;i<4;i++){const t=(i+.5)/4,r=rect(428-(428-340)*t,212-(212-108)*t,24,24,-50);g+=pvSlot('',0,null,r.pts);}
++  se.forEach((x,k)=>{const sl=S[k];if(!sl)return;const r=rect(sl[0],sl[1],sl[2],sl[3],sl[4]);g+=pvSlot('s',k,x,r.pts,r.ctr,sl[4]&&Math.abs(sl[4])>60?sl[4]+90:sl[4],sl[2]<34||sl[3]<26?11:13);});
++  g+=`<rect class="chim" x="240" y="140" width="22" height="18" rx="2"/><line class="div" x1="251" y1="8" x2="251" y2="292"/>`+
++    `<text class="tag" x="30" y="254">mój dach</text><text class="tag" x="450" y="254" text-anchor="end">sąsiad</text>`;
++  return `<svg class="rsvg" viewBox="22 38 436 222">${g}</svg>`;
++}
++// terrace roof seen from the garden: lean-to roof on the house wall with the Hoymiles panels
++function terraceSvg(hm,rows){
++  const n=hm.length,cols=Math.ceil(n/rows),A=[14,128],B=[466,128],D=[40,72];
++  const P=(u,v)=>[A[0]+u*(B[0]-A[0])+v*(D[0]-A[0]),A[1]+u*(B[1]-A[1])+v*(D[1]-A[1])];
++  let g=`<rect class="wall" x="0" y="0" width="480" height="250"/><rect class="wood" x="300" y="4" width="70" height="56"/><rect class="wood" x="410" y="4" width="70" height="56"/>`+
++    `<rect class="wnd" x="120" y="6" width="80" height="58"/><rect class="wnd" x="230" y="10" width="34" height="46"/><rect class="wnd" x="380" y="10" width="26" height="46"/><path class="rail" d="M118 40H202M118 48H202M118 56H202"/>`+
++    `<polygon class="lroof" points="${A.join(',')} ${B.join(',')} ${[B[0]-26+52,72].join(',')} ${D.join(',')}"/>`;
++  g=g.replace(`${B[0]-26+52},72`,`${466-26+52-52+26},72`);
++  for(let k=0;k<n;k++){const c=Math.floor(k/rows),r=k%rows,u0=(c+.05)/cols,u1=(c+.95)/cols,v0=(rows-1-r+.08)/rows,v1=(rows-r-.08)/rows;
++    const q=[P(u0,v0),P(u1,v0),P(u1,v1),P(u0,v1)],pts=q.map(z=>z[0].toFixed(1)+','+z[1].toFixed(1)).join(' '),ctr=P((u0+u1)/2,(v0+v1)/2);
++    g+=pvSlot('h',k,hm[k],pts,ctr,0,cols>6?11:13);}
++  g+=`<rect class="fascia" x="6" y="128" width="468" height="10"/>`;
++  for(let x=40;x<470;x+=56)g+=`<rect class="beam" x="${x}" y="138" width="8" height="10"/>`;
++  g+=`<rect class="brick" x="6" y="138" width="22" height="104"/><rect class="brick" x="452" y="138" width="22" height="104"/>`+
++    `<rect class="curt" x="28" y="138" width="262" height="104"/><rect class="glass" x="40" y="160" width="116" height="58"/><rect class="glass" x="166" y="160" width="112" height="58"/>`+
++    `<rect class="door" x="290" y="150" width="70" height="92"/><rect class="curt" x="360" y="138" width="92" height="104"/><rect class="glass" x="370" y="160" width="72" height="58"/>`+
++    `<rect class="grass" x="0" y="242" width="480" height="8"/>`;
++  return `<svg class="rsvg" viewBox="0 0 480 250">${g}</svg>`;
+ }
+ function roofs(h){
+-  const R=[];
+-  const M=h.mppt||[];
+-  if(M.length){const names=[...new Set(M.map(m=>m.inv))];
+-    const groups=M.map(m=>{const ps=(m.panels||[]).length?m.panels:[{name:'MPPT '+m.ch,wp:0,p:m.p,u:m.u,i:m.i,yd:m.yd}];
+-      return {l:(names.length>1?m.inv+' ':'')+'MPPT '+m.ch,p:ps.map(e=>({n:e.name,w:m.reachable?e.p:null,wp:e.wp,u:m.reachable?e.u:null,i:m.reachable?e.i:null,wh:e.yd,off:!m.reachable,src:'Hoymiles (szacunek z MPPT)'}))};});
+-    R.push(roofHtml('h',names.join(', ')||'Hoymiles','Hoymiles',groups,'#f59e0b'));}
+-  const C=h.se_cloud;
+-  if(C&&C.opt&&C.opt.length){const wp=C.peak_kw?C.peak_kw*1000/C.opt.length:400,by={};
+-    C.opt.forEach(o=>{const l='String '+(o.s||'1');(by[l]=by[l]||[]).push({n:o.n,w:o.st?0:o.p,wp,u:o.u,i:o.i,wh:o.wh,t:o.t,pm:o.pm,off:!C.valid,src:'SolarEdge (optymalizator, chmura)'});});
+-    R.push(roofHtml('s',C.name||'SolarEdge','SolarEdge',Object.keys(by).map(l=>({l,p:by[l]})),'#3b82f6'));
+-    $('rNote').textContent=C.valid?' · SolarEdge z chmury, '+(C.age_s<120?'przed chwilą':'sprzed '+Math.round(C.age_s/60)+' min'):' · SolarEdge: brak danych z chmury';}
+-  else $('rNote').textContent='';
+-  $('dachy').style.display=R.length?'':'none';$('roofs').innerHTML=R.join('');
+-  $('roofs').querySelectorAll('.pv').forEach(b=>b.onclick=()=>{const x=RP[b.dataset.k];if(!x)return;
++  const M=h.mppt||[],C=h.se_cloud,L=h.live||{},R=[];
++  let hm=[];M.forEach(m=>{const ps=(m.panels||[]).length?m.panels:[{name:'MPPT '+m.ch,wp:0,p:m.p,u:m.u,i:m.i,yd:m.yd}];
++    ps.forEach((e,j)=>hm.push({n:'MPPT '+m.ch+(ps.length>1?' · panel '+(j+1):'')+' – '+e.name,w:m.reachable?e.p:null,wp:e.wp,u:m.reachable?e.u:null,i:m.reachable?e.i:null,wh:e.yd,off:!m.reachable,src:'Hoymiles (szacunek z MPPT)'}));});
++  let se=[];if(C&&C.opt&&C.opt.length){const wp=C.peak_kw?C.peak_kw*1000/C.opt.length:400;
++    se=C.opt.map(o=>({n:o.n+(o.s?' · string '+o.s:''),w:o.st?0:o.p,wp,u:o.u,i:o.i,wh:o.wh,t:o.t,pm:o.pm,off:!C.valid,src:'SolarEdge (optymalizator, chmura)'}));}
++  const head=(t,n,v,col)=>`<div class="rhd"><b>${t}</b><span class="mu">${n?n+' '+(n==1?'panel':(n%10>=2&&n%10<=4&&(n%100<10||n%100>=20)?'panele':'paneli')):''}</span><span class="rw" style="color:${col}">${v}</span></div>`;
++  R.push(`<div class="roof">${head('Dach · SolarEdge',se.length,L.se_valid?w(L.se_w):'–','#3b82f6')}${roofSvg(se)}${se.length?'':'<div class="mu" style="font-size:12px">Panele z mocą pojawią się po uruchomieniu chmury SolarEdge (menu Chmura SolarEdge).</div>'}</div>`);
++  if(hm.length){const rows=M.every(m=>(m.panels||[]).length===2)?2:(hm.length<=5?1:2);
++    R.push(`<div class="roof">${head('Taras · Hoymiles',hm.length,L.hoy_reachable?w(L.hoy_w):'–','#f59e0b')}${terraceSvg(hm,rows)}</div>`);}
++  $('rNote').textContent=C&&C.opt&&C.opt.length?(C.valid?' · SolarEdge z chmury, '+(C.age_s<120?'przed chwilą':'sprzed '+Math.round(C.age_s/60)+' min'):' · SolarEdge: brak danych z chmury'):'';
++  $('dachy').style.display='';$('roofs').innerHTML=R.join('');
++  $('roofs').querySelectorAll('.sp[data-k]').forEach(b=>b.onclick=()=>{const x=RP[b.dataset.k];if(!x)return;
+     const it=[['Moc',x.w==null||x.off?'–':w(x.w)],['Napięcie',x.u==null?'–':nf(x.u,1)+' V'],['Prąd',x.i==null?'–':nf(x.i,2)+' A'],['Dziś',x.wh==null?'–':kwhS(x.wh/1000)]];
+     if(x.t!=null)it.push(['Temp.',nf(x.t,0)+' °C']);if(x.wp)it.push(['Moc nominalna',Math.round(x.wp)+' Wp']);
+     $('rDet').innerHTML=`<b>${esc(x.n)}</b> <span class="mu">${esc(x.src)}${x.pm?' · '+esc(x.pm):''}</span><br>`+it.map(([a,b])=>`${a}: <b>${b}</b>`).join(' · ');
+-    $('roofs').querySelectorAll('.pv.sel').forEach(e=>e.classList.remove('sel'));b.classList.add('sel');});
++    $('roofs').querySelectorAll('.sp.sel').forEach(e=>e.classList.remove('sel'));b.classList.add('sel');});
+ }
+ // house scene: SolarEdge panels on the house roof, Hoymiles panels on the terrace roof next to it
+ const SV=(t,a,c='')=>'<'+t+' '+Object.entries(a).map(([k,v])=>k+'="'+v+'"').join(' ')+(c?'>'+c+'</'+t+'>':'/>');
+-- 
+2.43.0
+
+From 5a37add150a1bd7945b13a9ea54d41140a6d510f Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 16:27:37 +0100
+Subject: [PATCH] Roof drawing: assign each SolarEdge optimizer to its place on
+ the roof
+
+Button 'Przypisz panele' under the roof drawing: tap a panel place, pick the
+optimizer from the list (swaps if it was elsewhere), save. The assignment is
+kept in /secloud_map.json (POST /api/fusion/secloud/map, admin) and sent with
+/api/history; places without an assignment are filled in list order.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h    | 33 ++++++++++++++++++++++++++++-----
+ include/SolarEdgeCloud.h |  3 +++
+ include/WebApi_fusion.h  |  1 +
+ src/SolarEdgeCloud.cpp   | 34 ++++++++++++++++++++++++++++++++++
+ src/WebApi_fusion.cpp    | 11 +++++++++++
+ 5 files changed, 77 insertions(+), 5 deletions(-)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index f7e740ce..9fa60002 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -214,6 +214,9 @@ section.chart{overflow:visible}
+ .rsvg .wall{fill:#eceae4}.rsvg .wood{fill:#8a5a3b}.rsvg .wnd{fill:#9ec3df;stroke:#6b4430;stroke-width:3}.rsvg .rail{stroke:#9aa3ab;stroke-width:1.5}
+ .rsvg .lroof{fill:#5b6168}.rsvg .fascia{fill:#4a2f22}.rsvg .beam{fill:#6b4430}.rsvg .brick{fill:#9b4a35}
+ .rsvg .curt{fill:#4a2a20}.rsvg .glass{fill:#c9d2d6;opacity:.55}.rsvg .door{fill:#f5f2ea}.rsvg .grass{fill:#6cab55}
++
++.redit{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px;margin-top:6px}.redit .btn{padding:6px 12px;font-size:13px}
++#rDet select{max-width:100%;margin-left:4px;padding:4px;font-size:13px}
+ </style>
+ </head>
+ <body>
+@@ -341,7 +344,7 @@ function heat(f){f=Math.max(0,Math.min(1,f||0));const c=[[30,41,59],[29,78,216],
+ function pvSlot(id,k,x,pts,ctr,ang,fs){ // one clickable panel: x={w,wp,...} or null (neighbour)
+   const own=!!x,f=own&&x.wp&&x.w>0?Math.min(1,x.w/x.wp):0;
+   let o=`<g class="sp${own?'':' nb'}"${own?` data-k="${id}${k}"`:''}><polygon class="spb" points="${pts}"${own&&!x.off?` style="fill:${heat(f)}"`:''}/>`;
+-  if(own){RP[id+k]=x;const t=x.off||x.w==null?'–':Math.round(x.w);
++  if(own){RP[id+k]=x;const t=x.lab!=null?x.lab:(x.off||x.w==null?'–':Math.round(x.w));
+     o+=`<text x="${ctr[0].toFixed(1)}" y="${(ctr[1]+fs*.36).toFixed(1)}" font-size="${fs}"${ang?` transform="rotate(${ang} ${ctr[0].toFixed(1)} ${ctr[1].toFixed(1)})"`:''} style="fill:${f<0.6?'#fff':'#1f1700'}">${t}</text>`;}
+   return o+'</g>';
+ }
+@@ -387,18 +390,38 @@ function terraceSvg(hm,rows){
+     `<rect class="grass" x="0" y="242" width="480" height="8"/>`;
+   return `<svg class="rsvg" viewBox="0 0 480 250">${g}</svg>`;
+ }
+-function roofs(h){
++let ED={on:false,order:[]},SEC=null,LASTH=null;
++function seOrder(C){ // saved slot -> optimizer assignment, missing slots filled in list order
++  const sns=C.opt.map(o=>o.sn),used=new Set(),out=new Array(sns.length).fill(null);
++  (C.map||[]).forEach((sn,i)=>{if(i<out.length&&sn&&sns.includes(sn)&&!used.has(sn)){out[i]=sn;used.add(sn);}});
++  const rest=sns.filter(sn=>!used.has(sn));return out.map(v=>v||rest.shift());
++}
++function roofs(h){LASTH=h;
+   const M=h.mppt||[],C=h.se_cloud,L=h.live||{},R=[];
+   let hm=[];M.forEach(m=>{const ps=(m.panels||[]).length?m.panels:[{name:'MPPT '+m.ch,wp:0,p:m.p,u:m.u,i:m.i,yd:m.yd}];
+     ps.forEach((e,j)=>hm.push({n:'MPPT '+m.ch+(ps.length>1?' · panel '+(j+1):'')+' – '+e.name,w:m.reachable?e.p:null,wp:e.wp,u:m.reachable?e.u:null,i:m.reachable?e.i:null,wh:e.yd,off:!m.reachable,src:'Hoymiles (szacunek z MPPT)'}));});
+-  let se=[];if(C&&C.opt&&C.opt.length){const wp=C.peak_kw?C.peak_kw*1000/C.opt.length:400;
+-    se=C.opt.map(o=>({n:o.n+(o.s?' · string '+o.s:''),w:o.st?0:o.p,wp,u:o.u,i:o.i,wh:o.wh,t:o.t,pm:o.pm,off:!C.valid,src:'SolarEdge (optymalizator, chmura)'}));}
++  let se=[];SEC=C;if(C&&C.opt&&C.opt.length){const wp=C.peak_kw?C.peak_kw*1000/C.opt.length:400;
++    const order=ED.on?ED.order:seOrder(C);
++    se=order.map((sn,k)=>{const o=C.opt.find(z=>z.sn===sn)||{};return {sn,slot:k,n:o.n+(o.s?' · string '+o.s:''),w:o.st?0:o.p,wp,u:o.u,i:o.i,wh:o.wh,t:o.t,pm:o.pm,off:!C.valid,src:'SolarEdge (optymalizator, chmura)',lab:ED.on?String(o.n||'?').split('.').slice(-2).join('.'):null};});}
+   const head=(t,n,v,col)=>`<div class="rhd"><b>${t}</b><span class="mu">${n?n+' '+(n==1?'panel':(n%10>=2&&n%10<=4&&(n%100<10||n%100>=20)?'panele':'paneli')):''}</span><span class="rw" style="color:${col}">${v}</span></div>`;
+-  R.push(`<div class="roof">${head('Dach · SolarEdge',se.length,L.se_valid?w(L.se_w):'–','#3b82f6')}${roofSvg(se)}${se.length?'':'<div class="mu" style="font-size:12px">Panele z mocą pojawią się po uruchomieniu chmury SolarEdge (menu Chmura SolarEdge).</div>'}</div>`);
++  R.push(`<div class="roof">${head('Dach · SolarEdge',se.length,L.se_valid?w(L.se_w):'–','#3b82f6')}${roofSvg(se)}${se.length?
++    (ED.on?`<div class="redit"><span>Tryb przypisywania: dotknij panel na rysunku i wybierz optymalizator.</span><button class="btn" id="edSave">Zapisz układ</button><button class="btn sec" id="edCancel">Anuluj</button></div>`
++          :`<div class="redit"><button class="btn sec" id="edStart">Przypisz panele</button><span class="mu">ustaw, który optymalizator leży w którym miejscu dachu</span></div>`)
++    :'<div class="mu" style="font-size:12px">Panele z mocą pojawią się po uruchomieniu chmury SolarEdge (menu Chmura SolarEdge).</div>'}</div>`);
+   if(hm.length){const rows=M.every(m=>(m.panels||[]).length===2)?2:(hm.length<=5?1:2);
+     R.push(`<div class="roof">${head('Taras · Hoymiles',hm.length,L.hoy_reachable?w(L.hoy_w):'–','#f59e0b')}${terraceSvg(hm,rows)}</div>`);}
+   $('rNote').textContent=C&&C.opt&&C.opt.length?(C.valid?' · SolarEdge z chmury, '+(C.age_s<120?'przed chwilą':'sprzed '+Math.round(C.age_s/60)+' min'):' · SolarEdge: brak danych z chmury'):'';
+   $('dachy').style.display='';$('roofs').innerHTML=R.join('');
++  if($('edStart'))$('edStart').onclick=()=>{ED={on:true,order:seOrder(SEC)};roofs(LASTH);$('rDet').textContent='Dotknij panel na dachu.';};
++  if($('edCancel'))$('edCancel').onclick=()=>{ED={on:false,order:[]};roofs(LASTH);$('rDet').textContent='';};
++  if($('edSave'))$('edSave').onclick=async()=>{try{const r=await fetch('/api/fusion/secloud/map',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(JSON.stringify({map:ED.order}))});
++      if(!r.ok)throw new Error(r.status==401?'zaloguj się jako admin':r.status);SEC.map=ED.order.slice();ED={on:false,order:[]};roofs(LASTH);$('rDet').textContent='Układ paneli zapisany.';}catch(e){$('rDet').textContent='Nie zapisano: '+e.message;}};
++  if(ED.on){$('roofs').querySelectorAll('.sp[data-k^="s"]').forEach(b=>b.onclick=()=>{const x=RP[b.dataset.k];if(!x)return;
++      $('roofs').querySelectorAll('.sp.sel').forEach(e=>e.classList.remove('sel'));b.classList.add('sel');
++      $('rDet').innerHTML=`Miejsce <b>${x.slot+1}</b> na dachu: <select id="edSel">${SEC.opt.map(o=>`<option value="${esc(o.sn)}"${o.sn===x.sn?' selected':''}>${esc(o.n)}${o.s?' · string '+esc(o.s):''} (${esc(o.sn)})</option>`).join('')}</select>`;
++      $('edSel').onchange=e=>{const sn=e.target.value,j=ED.order.indexOf(sn);if(j>=0)ED.order[j]=ED.order[x.slot];ED.order[x.slot]=sn;roofs(LASTH);
++        $('rDet').innerHTML=`Miejsce <b>${x.slot+1}</b>: ${esc((SEC.opt.find(o=>o.sn===sn)||{}).n||sn)}. Dotknij kolejny panel albo zapisz układ.`;};});
++    return;}
+   $('roofs').querySelectorAll('.sp[data-k]').forEach(b=>b.onclick=()=>{const x=RP[b.dataset.k];if(!x)return;
+     const it=[['Moc',x.w==null||x.off?'–':w(x.w)],['Napięcie',x.u==null?'–':nf(x.u,1)+' V'],['Prąd',x.i==null?'–':nf(x.i,2)+' A'],['Dziś',x.wh==null?'–':kwhS(x.wh/1000)]];
+     if(x.t!=null)it.push(['Temp.',nf(x.t,0)+' °C']);if(x.wp)it.push(['Moc nominalna',Math.round(x.wp)+' Wp']);
+diff --git a/include/SolarEdgeCloud.h b/include/SolarEdgeCloud.h
+index 26b37f0c..34d8b9a3 100644
+--- a/include/SolarEdgeCloud.h
++++ b/include/SolarEdgeCloud.h
+@@ -62,6 +62,8 @@ public:
+     void toJson(JsonVariant root);
+     // compact optimizer list for the dashboard (roof view), read-only data
+     void liveToJson(JsonObject o);
++    // which optimizer (serial) lies on which panel slot of the roof drawing
++    bool setRoofMap(JsonArrayConst serials);
+ 
+     // fills SolarEdge data from the cloud if it is fresh enough; false if not
+     bool fill(SolarEdgeData& d);
+@@ -98,6 +100,7 @@ private:
+     uint32_t _requests = 0, _logins = 0;
+     struct Seen { String meas; uint32_t sinceMs; };
+     std::vector<std::pair<String, Seen>> _seen; // serial -> last measurement stamp
++    std::vector<String> _roofMap;              // slot -> optimizer serial ("" = automatic)
+ };
+ 
+ extern SolarEdgeCloudClass SolarEdgeCloud;
+diff --git a/include/WebApi_fusion.h b/include/WebApi_fusion.h
+index fb23a9f9..a12a352f 100644
+--- a/include/WebApi_fusion.h
++++ b/include/WebApi_fusion.h
+@@ -22,4 +22,5 @@ private:
+     void onSeCloudGet(AsyncWebServerRequest* request);
+     void onSeCloudPost(AsyncWebServerRequest* request);
+     void onSeCloudRefresh(AsyncWebServerRequest* request);
++    void onSeCloudMap(AsyncWebServerRequest* request);
+ };
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index 963a13d5..b2cb9177 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -19,6 +19,7 @@ SolarEdgeCloudClass SolarEdgeCloud;
+ 
+ #define SEC_CFG_FILE "/secloud.json"
+ #define SEC_TOK_FILE "/secloud_tok.json"
++#define SEC_MAP_FILE "/secloud_map.json"
+ static const char* LOGIN_BASE = "https://login.solaredge.com";
+ static const char* MON_BASE = "https://monitoring.solaredge.com";
+ static const char* CLIENT_ID = "ugfnsujd3384sshcjehaphlh3";
+@@ -239,6 +240,14 @@ void SolarEdgeCloudClass::load()
+         }
+         f.close();
+     }
++    f = LittleFS.open(SEC_MAP_FILE, "r");
++    if (f) {
++        JsonDocument d;
++        if (!deserializeJson(d, f)) {
++            for (JsonVariantConst v : d["map"].as<JsonArrayConst>()) _roofMap.push_back(v | "");
++        }
++        f.close();
++    }
+     f = LittleFS.open(SEC_TOK_FILE, "r");
+     if (f) {
+         JsonDocument d;
+@@ -910,5 +919,30 @@ void SolarEdgeCloudClass::liveToJson(JsonObject o)
+         if (!isnan(x.temp)) j["t"] = x.temp;
+         if (x.stale) j["st"] = true;
+         if (x.panel.length()) j["pm"] = x.panel;
++        j["sn"] = x.serial;
++    }
++    auto m = o["map"].to<JsonArray>();
++    for (auto& sn : _roofMap) m.add(sn);
++}
++
++bool SolarEdgeCloudClass::setRoofMap(JsonArrayConst serials)
++{
++    JsonDocument d;
++    auto arr = d["map"].to<JsonArray>();
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        _roofMap.clear();
++        for (JsonVariantConst v : serials) {
++            if (_roofMap.size() >= 80) break;
++            String sn = v | "";
++            sn = sn.substring(0, 24);
++            _roofMap.push_back(sn);
++            arr.add(sn);
++        }
+     }
++    File f = LittleFS.open(SEC_MAP_FILE, "w");
++    if (!f) return false;
++    const bool ok = serializeJson(d, f) > 0;
++    f.close();
++    return ok;
+ }
+diff --git a/src/WebApi_fusion.cpp b/src/WebApi_fusion.cpp
+index 033e96f9..42050062 100644
+--- a/src/WebApi_fusion.cpp
++++ b/src/WebApi_fusion.cpp
+@@ -13,6 +13,7 @@
+  *   GET  /api/fusion/secloud          config (never the password) + status + optimizer data (admin)
+  *   POST /api/fusion/secloud          data={"enabled":true,"site":"123","user":"a@b","password":"..","interval":15} (admin)
+  *   POST /api/fusion/secloud/refresh  fetch now (admin)
++ *   POST /api/fusion/secloud/map      data={"map":["<optimizer serial per roof slot>",..]} (admin)
+  */
+ #include "WebApi_fusion.h"
+ #include "FusionPages.h"
+@@ -38,6 +39,7 @@ void WebApiFusionClass::init(AsyncWebServer& server, Scheduler&)
+     server.on("/api/fusion/tuya", HTTP_POST, BIND(onTuyaPost));
+     server.on("/fusion/secloud", HTTP_GET, BIND(onSeCloudPage));
+     server.on("/api/fusion/secloud/refresh", HTTP_POST, BIND(onSeCloudRefresh));
++    server.on("/api/fusion/secloud/map", HTTP_POST, BIND(onSeCloudMap));
+     server.on("/api/fusion/secloud", HTTP_GET, BIND(onSeCloudGet));
+     server.on("/api/fusion/secloud", HTTP_POST, BIND(onSeCloudPost));
+ }
+@@ -166,3 +168,12 @@ void WebApiFusionClass::onSeCloudRefresh(AsyncWebServerRequest* request)
+     SolarEdgeCloud.requestRefresh();
+     reply(request, new AsyncJsonResponse(), true, "Queued", "");
+ }
++
++void WebApiFusionClass::onSeCloudMap(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentials(request)) return;
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    JsonDocument root;
++    if (!WebApi.parseRequestData(request, response, root)) return;
++    reply(request, response, SolarEdgeCloud.setRoofMap(root["map"].as<JsonArrayConst>()), "Settings saved!", "Failed to save settings!");
++}
+-- 
+2.43.0
+
+From 55bd8570032bf4cff5cae8e9370de400a467fd31 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 16:29:47 +0100
+Subject: [PATCH] Roof drawing: real roof shape and panel layout from the drone
+ photo
+
+M-shaped twin-house roof with two rear wings and the light well, own panels:
+2 portrait + 2 landscape (right one larger) on the front slope, a strip on the
+west face of the left wing (5 with 11 optimizers), two landscape on the wing
+facing the light well; neighbour's half with 1+2+3 front panels and the east
+strip.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 41 +++++++++++++++++++++++------------------
+ 1 file changed, 23 insertions(+), 18 deletions(-)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 9fa60002..36a5cdb9 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -207,7 +207,7 @@ section.chart{overflow:visible}
+ 
+ .rsvg{width:100%;height:auto;display:block;border-radius:10px}
+ .rsvg .flat{fill:#cfd4d8}.rsvg .par{fill:none;stroke:#8a9097;stroke-width:6}.rsvg .f1{fill:#3a3f46}.rsvg .f2{fill:#2b3037}.rsvg .f3{fill:#33383f}
+-.rsvg .rdg{stroke:#555c66;stroke-width:3}.rsvg .chim{fill:#e7e7e2;stroke:#9aa0a6}.rsvg .div{stroke:#fff;stroke-width:1.5;stroke-dasharray:6 5;opacity:.7}
++.rsvg .rdg{stroke:#555c66;stroke-width:2.5;fill:none}.rsvg .chim{fill:#e7e7e2;stroke:#9aa0a6}.rsvg .div{stroke:#fff;stroke-width:1.5;stroke-dasharray:6 5;opacity:.7}
+ .rsvg .tag{fill:#3b4350;font-size:13px;font-weight:600}
+ .rsvg .sp{cursor:pointer}.rsvg .spb{fill:#1d3f8f;stroke:#c8d6ff;stroke-width:1.2}.rsvg .sp.nb{cursor:default}.rsvg .sp.nb .spb{fill:#15181d;stroke:#4b525c}
+ .rsvg .sp text{font-weight:700;text-anchor:middle;pointer-events:none}.rsvg .sp.sel .spb{stroke:#fff;stroke-width:3}
+@@ -217,6 +217,7 @@ section.chart{overflow:visible}
+ 
+ .redit{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px;margin-top:6px}.redit .btn{padding:6px 12px;font-size:13px}
+ #rDet select{max-width:100%;margin-left:4px;padding:4px;font-size:13px}
++.rsvg .well{fill:#e9ecef}.rsvg .tag.sm{font-size:10px;font-weight:500;opacity:.7}
+ </style>
+ </head>
+ <body>
+@@ -352,24 +353,28 @@ function rect(cx,cy,w,h,ang){ // rotated rectangle -> points + centre
+   const a=(ang||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a),P=[[-w/2,-h/2],[w/2,-h/2],[w/2,h/2],[-w/2,h/2]].map(([x,y])=>[cx+x*c-y*s,cy+x*s+y*c]);
+   return {pts:P.map(q=>q[0].toFixed(1)+','+q[1].toFixed(1)).join(' '),ctr:[cx,cy]};
+ }
+-// aerial view of the roof: left half = own SolarEdge panels, right half = neighbour
++// aerial view of the roof (twin house, "M" roof with two rear wings and a light well between them):
++// left half = own SolarEdge panels, right half = neighbour
+ function roofSvg(se){
+-  const S=[];
+-  // own slots: front slope 2 portrait + 2 landscape, strip along the left hip, one on the back slope
+-  S.push([175,140,30,44,0],[208,140,30,44,0],[150,193,50,34,0],[203,193,50,34,0]);
+-  const nStrip=Math.max(4,se.length-5),P0=[62,206],P1=[150,104],L=Math.hypot(P1[0]-P0[0],P1[1]-P0[1]),ang=Math.atan2(P1[1]-P0[1],P1[0]-P0[0])*180/Math.PI;
+-  for(let i=0;i<nStrip;i++){const t=(i+.5)/nStrip;S.push([P0[0]+(P1[0]-P0[0])*t,P0[1]+(P1[1]-P0[1])*t,L/nStrip-3,26,ang]);}
+-  S.push([150,72,46,24,0]);
+-  let g=`<rect class="flat" x="4" y="4" width="472" height="292" rx="6"/><rect class="par" x="4" y="4" width="472" height="292" rx="6"/>`+
+-    `<polygon class="f1" points="40,50 440,50 310,105 170,105"/><polygon class="f2" points="40,240 440,240 310,105 170,105"/>`+
+-    `<polygon class="f3" points="40,50 170,105 40,240"/><polygon class="f3" points="440,50 310,105 440,240"/><line class="rdg" x1="170" y1="105" x2="310" y2="105"/>`;
+-  // neighbour panels
+-  [[296,132,36,24,0],[284,168,44,28,0],[333,168,44,28,0],[280,206,44,30,0],[328,206,44,30,0],[376,206,44,30,0]].forEach(([x,y,w2,h2,a])=>{const r=rect(x,y,w2,h2,a);g+=pvSlot('',0,null,r.pts);});
+-  for(let i=0;i<4;i++){const t=(i+.5)/4,r=rect(428-(428-340)*t,212-(212-108)*t,24,24,-50);g+=pvSlot('',0,null,r.pts);}
+-  se.forEach((x,k)=>{const sl=S[k];if(!sl)return;const r=rect(sl[0],sl[1],sl[2],sl[3],sl[4]);g+=pvSlot('s',k,x,r.pts,r.ctr,sl[4]&&Math.abs(sl[4])>60?sl[4]+90:sl[4],sl[2]<34||sl[3]<26?11:13);});
+-  g+=`<rect class="chim" x="240" y="140" width="22" height="18" rx="2"/><line class="div" x1="251" y1="8" x2="251" y2="292"/>`+
+-    `<text class="tag" x="30" y="254">mój dach</text><text class="tag" x="450" y="254" text-anchor="end">sąsiad</text>`;
+-  return `<svg class="rsvg" viewBox="22 38 436 222">${g}</svg>`;
++  const S=[],N=se.length;
++  // own slots: front slope 2 portrait (upper) + 2 landscape (lower, the right one larger), strip on the west face of the left wing, two landscape on the wing facing the light well
++  S.push([178,186,26,34,0],[207,186,26,34,0],[152,227,44,24,0],[205,227,54,27,0]);
++  const nStrip=Math.max(3,N-6),y0=58,y1=184,hh=(y1-y0)/nStrip;
++  for(let i=0;i<nStrip;i++)S.push([76,y0+(i+.5)*hh,44,hh-3,0]);
++  S.push([164,86,38,25,0],[164,114,38,25,0]);
++  let g=`<rect class="flat" x="4" y="4" width="472" height="292" rx="6"/><rect class="par" x="30" y="30" width="420" height="230" rx="3"/>`+
++    `<rect class="well" x="200" y="34" width="80" height="86"/>`+
++    `<polygon class="f3" points="40,40 110,70 110,160 40,250"/><polygon class="f1" points="40,40 200,40 110,70"/><polygon class="f3" points="110,70 200,40 200,120 110,160"/>`+
++    `<polygon class="f3" points="370,70 280,40 280,120 370,160"/><polygon class="f1" points="280,40 440,40 370,70"/><polygon class="f3" points="440,40 370,70 370,160 440,250"/>`+
++    `<polygon class="f1" points="110,160 200,120 280,120 370,160"/><polygon class="f2" points="40,250 440,250 370,160 110,160"/>`+
++    `<path class="rdg" d="M110 70V160H370V70M40 40L110 70M200 40L110 70M440 40L370 70M280 40L370 70M40 250L110 160M440 250L370 160M200 120L110 160M280 120L370 160"/>`;
++  // neighbour panels: front 1 + 2 + 3, strip on the east face of the right wing
++  [[300,183,34,22],[284,206,42,22],[330,206,42,22],[278,230,42,22],[324,230,42,22],[370,230,42,22]].forEach(([x,y,w2,h2])=>{g+=pvSlot('',0,null,rect(x,y,w2,h2,0).pts);});
++  for(let i=0;i<4;i++)g+=pvSlot('',0,null,rect(404,62+(i+.5)*30,44,27,0).pts);
++  se.forEach((x,k)=>{const sl=S[k];if(!sl)return;const r=rect(sl[0],sl[1],sl[2],sl[3],sl[4]);g+=pvSlot('s',k,x,r.pts,r.ctr,0,sl[2]<30||sl[3]<22?10:12);});
++  g+=`<rect class="chim" x="243" y="190" width="20" height="16" rx="2"/><line class="div" x1="253" y1="30" x2="253" y2="260"/>`+
++    `<text class="tag" x="36" y="274">mój dach</text><text class="tag" x="444" y="274" text-anchor="end">sąsiad</text><text class="tag sm" x="240" y="292" text-anchor="middle">ulica ↑ · ogród ↓</text>`;
++  return `<svg class="rsvg" viewBox="22 26 436 272">${g}</svg>`;
+ }
+ // terrace roof seen from the garden: lean-to roof on the house wall with the Hoymiles panels
+ function terraceSvg(hm,rows){
+-- 
+2.43.0
+
+From 34560df930f20a5d9cc7e8ef323f68d1a008c573 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 16:37:00 +0100
+Subject: [PATCH] Dashboard scene: the real twin house
+
+White flat-roof twin house with wood cladding: own segment with the SolarEdge
+panels on the roof and the terrace lean-to roof with the Hoymiles panels,
+brown curtains and brick pillars, each panel with its live power; the
+neighbour's segment with dark panels. Power ring moved up a little.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 56 +++++++++++++++++++++++--------------------
+ 1 file changed, 30 insertions(+), 26 deletions(-)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 36a5cdb9..f8f159cf 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -130,7 +130,7 @@ footer{color:var(--mu);font-size:12px;text-align:center;padding:4px 0 24px}
+ .hl{font-size:14px;opacity:.92}.hv{font-size:24px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.2}.hs{font-size:12.5px;opacity:.85;margin-top:2px}
+ .htr{position:absolute;right:18px;top:16px;display:flex;gap:8px;align-items:center;font-size:12.5px;line-height:1.2;text-align:right;text-shadow:0 1px 6px #0003}
+ .htr b{font-size:16px}
+-.ring{position:absolute;left:50%;top:162px;width:146px;height:146px;margin:-73px 0 0 -73px;border-radius:50%;background:radial-gradient(circle,#0b1d5c55,#0b1d5c22 70%);backdrop-filter:blur(3px);display:flex;flex-direction:column;align-items:center;justify-content:center;text-shadow:0 1px 6px #0004}
++.ring{position:absolute;left:50%;top:148px;width:146px;height:146px;margin:-73px 0 0 -73px;border-radius:50%;background:radial-gradient(circle,#0b1d5c55,#0b1d5c22 70%);backdrop-filter:blur(3px);display:flex;flex-direction:column;align-items:center;justify-content:center;text-shadow:0 1px 6px #0004}
+ .hero.day .ring{background:radial-gradient(circle,#0b3d8a44,#0b3d8a18 70%)}
+ .ring svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+ .ring .trk{fill:none;stroke:#ffffff;stroke-opacity:.55;stroke-width:1.6}
+@@ -139,7 +139,7 @@ footer{color:var(--mu);font-size:12px;text-align:center;padding:4px 0 24px}
+ .rv b{font-size:38px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em}.rv span{font-size:14px;margin-left:3px}
+ .rl{font-size:13px;opacity:.92;margin-top:-2px}
+ @media(min-width:760px){.hero{height:380px}.ring{left:58%;top:170px;width:184px;height:184px;margin:-92px 0 0 -92px}.rv b{font-size:46px}.htl{left:26px;top:22px}.hv{font-size:30px}.htr{right:24px;top:22px}}
+-@media(max-width:400px){.ring{top:160px;width:138px;height:138px;margin:-69px 0 0 -69px}.rv b{font-size:34px}.tabs button{font-size:14px;padding:7px 10px}}
++@media(max-width:400px){.ring{top:146px;width:138px;height:138px;margin:-69px 0 0 -69px}.rv b{font-size:34px}.tabs button{font-size:14px;padding:7px 10px}}
+ @media (prefers-reduced-motion:reduce){.hero.prod .pvg{animation:none}.ring .arc{transition:none}}
+ /* source cards */
+ .src{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
+@@ -218,6 +218,9 @@ section.chart{overflow:visible}
+ .redit{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px;margin-top:6px}.redit .btn{padding:6px 12px;font-size:13px}
+ #rDet select{max-width:100%;margin-left:4px;padding:4px;font-size:13px}
+ .rsvg .well{fill:#e9ecef}.rsvg .tag.sm{font-size:10px;font-weight:500;opacity:.7}
++.hero .par{fill:var(--rf);opacity:.9}.hero .wd{fill:#8a5a3b}.hero .rail{stroke:#9aa3ab;stroke-width:1}.hero .pv.nb{fill:#15181d;stroke:#4b525c}
++.hero .cur{fill:#4a2a20}.hero .gl{fill:#c9d2d6;opacity:.45}.hero .dr{fill:var(--w1)}.hero .br{fill:#9b4a35}.hero .fas{fill:#4a2f22}
++.hero .rval{font-size:8px}
+ </style>
+ </head>
+ <body>
+@@ -451,32 +454,33 @@ function pvGrid(A,B,D,n,rows,vals,colMajor){ // parallelogram A=front-left, B=fr
+ function scene(h){
+   const L=h.live||{},C=h.se_cloud,M=h.mppt||[];
+   let se=[];if(C&&C.opt&&C.opt.length){const wp=C.peak_kw?C.peak_kw*1000/C.opt.length:400;se=C.opt.map(o=>({w:C.valid?(o.st?0:o.p):null,wp}));}
+-  const seN=se.length||10;
++  const seN=se.length||11;
+   let hm=[];M.forEach(m=>{const ps=(m.panels||[]).length?m.panels:[{p:m.p,wp:0}];ps.forEach(e=>hm.push({w:m.reachable?e.p:null,wp:e.wp}));});
+-  const hmN=hm.length||8,hmRows=M.length&&M.every(m=>(m.panels||[]).length===2)?2:(hmN<=4?1:2);
+-  const seRows=seN<=8?2:(seN<=15?3:4);
+-  const fmt=v=>v==null?'–':w(v);
++  const hmN=hm.length||8,fmt=v=>v==null?'–':w(v);
+   let g='';
+-  // house
+-  g+=SV('rect',{class:'w1',x:6,y:188,width:108,height:72});
+-  g+=SV('polygon',{class:'w2',points:'114,188 158,188 158,260 114,260'});
+-  g+=SV('polygon',{class:'w3',points:'114,189 136,160 158,189'});
+-  g+=SV('polygon',{class:'rf',points:'0,191 118,191 140,151 22,151'});
+-  g+=pvGrid([3,188.5],[115,188.5],[24,153.5],seN,seRows,se,false);
+-  g+=SV('line',{class:'eave',x1:-2,y1:191.5,x2:120,y2:191.5});
+-  g+=SV('rect',{class:'win',x:16,y:206,width:40,height:54});
+-  g+=SV('path',{class:'mul',d:'M29.3 206V260M42.7 206V260M16 225H56'});
+-  g+=SV('rect',{class:'box se',x:121,y:207,width:30,height:20,rx:2})+SV('polygon',{class:'sem',points:'131,220 139,213 144,213 136,220'});
+-  g+=SV('text',{class:'rlab',x:85,y:204},'SolarEdge');
+-  g+=SV('text',{class:'rval',x:85,y:216},fmt(L.se_valid?L.se_w:null));
+-  // terrace roof (pergola) attached to the side wall
+-  g+=SV('line',{class:'post',x1:166,y1:205,x2:166,y2:260})+SV('line',{class:'post',x1:236,y1:205,x2:236,y2:260});
+-  g+=SV('polygon',{class:'rf tr',points:'158,206 240,206 246,190 158,190'});
+-  g+=pvGrid([160,204],[238,204],[162,192],hmN,hmRows,hm,true);
+-  g+=SV('line',{class:'eave',x1:156,y1:206.5,x2:242,y2:206.5});
+-  g+=SV('rect',{class:'box',x:186,y:222,width:22,height:14,rx:2})+SV('rect',{class:'hm',x:186,y:222,width:22,height:3,rx:1});
+-  g+=SV('text',{class:'rlab lt',x:201,y:246},'Hoymiles');
+-  g+=SV('text',{class:'rval lt',x:201,y:257},fmt(L.hoy_reachable?L.hoy_w:null));
++  // two segments of the twin house: own (x 0..245) and neighbour (245..490)
++  for(const [x0,own] of [[0,true],[245,false]]){
++    const X=v=>x0+v;
++    g+=SV('rect',{class:'w1',x:X(0),y:178,width:245,height:82});                               // walls
++    g+=SV('polygon',{class:'rf',points:`${X(4)},178 ${X(241)},178 ${X(226)},150 ${X(19)},150`}); // hip roof (front slope)
++    g+=SV('rect',{class:'par',x:X(0),y:176,width:245,height:5});                               // parapet
++    g+=SV('rect',{class:'wd',x:X(150),y:181,width:30,height:27})+SV('rect',{class:'wd',x:X(206),y:181,width:30,height:27}); // wood cladding
++    [[18,26],[58,46],[185,18]].forEach(([wx,ww])=>{g+=SV('rect',{class:'win',x:X(wx),y:184,width:ww,height:18});});
++    g+=SV('path',{class:'rail',d:`M${X(58)} 194H${X(104)}M${X(58)} 198H${X(104)}M${X(18)} 194H${X(44)}M${X(18)} 198H${X(44)}`});
++    // roof panels
++    const vals=own?se:[],n=own?seN:8;
++    g+=pvGrid([X(14),176],[X(232),176],[X(26),152],n,2,vals,false).replace(own?/^$/:/class="pv"/g,own?'':'class="pv nb"').replace(own?/^$/:/<text[^>]*>[^<]*<\/text>/g,'');
++    // terrace: lean-to roof with panels, curtains, brick pillars
++    g+=SV('rect',{class:'cur',x:X(10),y:230,width:225,height:30});
++    [[22,58],[92,52],[186,40]].forEach(([cx,cw])=>{g+=SV('rect',{class:'gl',x:X(cx),y:236,width:cw,height:12});});
++    g+=SV('rect',{class:'dr',x:X(150),y:232,width:30,height:28});
++    g+=SV('rect',{class:'br',x:X(0),y:228,width:10,height:32})+SV('rect',{class:'br',x:X(235),y:228,width:10,height:32});
++    g+=SV('polygon',{class:'rf tr',points:`${X(-2)},230 ${X(247)},230 ${X(241)},204 ${X(4)},204`});
++    if(own)g+=pvGrid([X(4),228],[X(241),228],[X(9),206],hmN,2,hm,true);
++    g+=SV('rect',{class:'fas',x:X(-2),y:230,width:249,height:3});
++  }
++  g+=SV('text',{class:'rlab',x:128,y:191},'SolarEdge')+SV('text',{class:'rval',x:128,y:201},fmt(L.se_valid?L.se_w:null));
++  g+=SV('text',{class:'rval lt',x:118,y:253},'Hoymiles '+fmt(L.hoy_reachable?L.hoy_w:null));
+   $('houseG').innerHTML=g;
+ }
+ let tMode='days';
+-- 
+2.43.0
+
+From 4e8946573b03a2a46ca4c9d26a3deea717637b95 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 16:41:58 +0100
+Subject: [PATCH] Dashboard scene: house seen slightly from above, with the
+ garden
+
+The house is its own layer (bottom left): the M roof from above with the real
+panel layout (same places and assignment as the roof card), the facade below,
+the terrace lean-to roof with the Hoymiles panels and a green garden with a
+hedge. On phones the power ring moves to the top right so it does not cover
+the roof.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 84 ++++++++++++++++++++++++++++---------------
+ 1 file changed, 55 insertions(+), 29 deletions(-)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index f8f159cf..f30feec3 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -130,7 +130,7 @@ footer{color:var(--mu);font-size:12px;text-align:center;padding:4px 0 24px}
+ .hl{font-size:14px;opacity:.92}.hv{font-size:24px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.2}.hs{font-size:12.5px;opacity:.85;margin-top:2px}
+ .htr{position:absolute;right:18px;top:16px;display:flex;gap:8px;align-items:center;font-size:12.5px;line-height:1.2;text-align:right;text-shadow:0 1px 6px #0003}
+ .htr b{font-size:16px}
+-.ring{position:absolute;left:50%;top:148px;width:146px;height:146px;margin:-73px 0 0 -73px;border-radius:50%;background:radial-gradient(circle,#0b1d5c55,#0b1d5c22 70%);backdrop-filter:blur(3px);display:flex;flex-direction:column;align-items:center;justify-content:center;text-shadow:0 1px 6px #0004}
++.ring{position:absolute;left:50%;top:140px;width:146px;height:146px;margin:-73px 0 0 -73px;border-radius:50%;background:radial-gradient(circle,#0b1d5c55,#0b1d5c22 70%);backdrop-filter:blur(3px);display:flex;flex-direction:column;align-items:center;justify-content:center;text-shadow:0 1px 6px #0004}
+ .hero.day .ring{background:radial-gradient(circle,#0b3d8a44,#0b3d8a18 70%)}
+ .ring svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+ .ring .trk{fill:none;stroke:#ffffff;stroke-opacity:.55;stroke-width:1.6}
+@@ -138,8 +138,9 @@ footer{color:var(--mu);font-size:12px;text-align:center;padding:4px 0 24px}
+ .ring .arc.h{stroke:#ffb347}.ring .arc.s{stroke:#7fd1ff}.hero.day .ring .arc.s{stroke:#0d47a8}
+ .rv b{font-size:38px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em}.rv span{font-size:14px;margin-left:3px}
+ .rl{font-size:13px;opacity:.92;margin-top:-2px}
+-@media(min-width:760px){.hero{height:380px}.ring{left:58%;top:170px;width:184px;height:184px;margin:-92px 0 0 -92px}.rv b{font-size:46px}.htl{left:26px;top:22px}.hv{font-size:30px}.htr{right:24px;top:22px}}
+-@media(max-width:400px){.ring{top:146px;width:138px;height:138px;margin:-69px 0 0 -69px}.rv b{font-size:34px}.tabs button{font-size:14px;padding:7px 10px}}
++@media(min-width:760px){.hero{height:380px}.ring{left:74%;top:170px;width:184px;height:184px;margin:-92px 0 0 -92px}.rv b{font-size:46px}.htl{left:26px;top:22px}.hv{font-size:30px}.htr{right:24px;top:22px}}
++@media(max-width:759px){.hero{height:430px}.ring{left:auto;right:18px;top:62px;width:132px;height:132px;margin:0}}
++@media(max-width:400px){.ring{width:126px;height:126px}.rv b{font-size:34px}.tabs button{font-size:14px;padding:7px 10px}}
+ @media (prefers-reduced-motion:reduce){.hero.prod .pvg{animation:none}.ring .arc{transition:none}}
+ /* source cards */
+ .src{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
+@@ -221,6 +222,11 @@ section.chart{overflow:visible}
+ .hero .par{fill:var(--rf);opacity:.9}.hero .wd{fill:#8a5a3b}.hero .rail{stroke:#9aa3ab;stroke-width:1}.hero .pv.nb{fill:#15181d;stroke:#4b525c}
+ .hero .cur{fill:#4a2a20}.hero .gl{fill:#c9d2d6;opacity:.45}.hero .dr{fill:var(--w1)}.hero .br{fill:#9b4a35}.hero .fas{fill:#4a2f22}
+ .hero .rval{font-size:8px}
++.hero .house2{position:absolute;left:0;bottom:0;width:100%;max-width:440px;height:auto;z-index:-1}
++.hero .flat{fill:#cfd4d8}.hero.night .flat{fill:#6b7590}.hero .well{fill:#e9ecef}.hero.night .well{fill:#8790aa}
++.hero .f1{fill:#3a3f46}.hero .f2{fill:#2b3037}.hero .f3{fill:#33383f}.hero .pare{fill:#9aa1a8}
++.hero .lawn{fill:var(--hill)}.hero .lawn2{fill:var(--hill);filter:brightness(.93)}.hero .hedge{fill:#3e7c3a}.hero .tree2{fill:#4f8f45}.hero .path{stroke:#d9d4c7;stroke-width:5}.hero .deck{fill:#7a4b33}
++.hero.night .hedge,.hero.night .tree2{fill:#173455}
+ </style>
+ </head>
+ <body>
+@@ -239,7 +245,8 @@ section.chart{overflow:visible}
+ <g class="c2"><circle cx="0" cy="236" r="42"/><circle cx="92" cy="226" r="46"/><circle cx="190" cy="240" r="38"/><circle cx="300" cy="222" r="50"/><circle cx="402" cy="238" r="40"/><circle cx="500" cy="224" r="48"/><circle cx="600" cy="238" r="40"/><circle cx="700" cy="222" r="52"/><circle cx="800" cy="238" r="42"/><rect x="0" y="234" width="800" height="26"/></g>
+ <path class="hill" d="M0 252 Q130 236 270 248 T540 244 T800 246 V260 H0Z"/>
+ <g class="tree"><path d="M560 260 L574 214 L588 260Z M590 260 L606 200 L622 260Z M728 260 L744 206 L760 260Z M756 260 L768 222 L780 260Z"/><ellipse cx="660" cy="252" rx="26" ry="12"/><ellipse cx="300" cy="254" rx="20" ry="9"/></g>
+-<g class="house" id="houseG"></g></svg>
++</svg>
++    <svg class="house2" id="houseG" viewBox="0 0 400 250" preserveAspectRatio="xMinYMax meet" aria-hidden="true"></svg>
+     <div class="htl"><div class="hl">Dzisiejsza produkcja</div><div class="hv" id="heroToday">–</div><div class="hs" id="heroSub"></div></div>
+     <div class="htr"><span id="heroIc"></span><span id="heroSun"></span></div>
+     <div class="ring" id="ring"><svg viewBox="0 0 120 120" aria-hidden="true"><circle class="trk" cx="60" cy="60" r="53"/><circle class="arc h" id="arcH" cx="60" cy="60" r="53"/><circle class="arc s" id="arcS" cx="60" cy="60" r="53"/></svg>
+@@ -358,6 +365,13 @@ function rect(cx,cy,w,h,ang){ // rotated rectangle -> points + centre
+ }
+ // aerial view of the roof (twin house, "M" roof with two rear wings and a light well between them):
+ // left half = own SolarEdge panels, right half = neighbour
++function roofSlots(N){ // own panel places on the roof plan (roof coordinates 40..440 x 40..250)
++  const S=[[178,186,26,34],[207,186,26,34],[152,227,44,24],[205,227,54,27]];
++  const nStrip=Math.max(3,N-6),y0=58,y1=184,hh=(y1-y0)/nStrip;
++  for(let i=0;i<nStrip;i++)S.push([76,y0+(i+.5)*hh,44,hh-3]);
++  S.push([164,86,38,25],[164,114,38,25]);return S;
++}
++const NB_SLOTS=[[300,183,34,22],[284,206,42,22],[330,206,42,22],[278,230,42,22],[324,230,42,22],[370,230,42,22],[404,77,44,27],[404,107,44,27],[404,137,44,27],[404,167,44,27]];
+ function roofSvg(se){
+   const S=[],N=se.length;
+   // own slots: front slope 2 portrait (upper) + 2 landscape (lower, the right one larger), strip on the west face of the left wing, two landscape on the wing facing the light well
+@@ -451,36 +465,48 @@ function pvGrid(A,B,D,n,rows,vals,colMajor){ // parallelogram A=front-left, B=fr
+     if(x.w!=null&&cw>=13)o+=SV('text',{class:'pvt',x:ctr[0].toFixed(1),y:(ctr[1]+2.3).toFixed(1),'font-size':cw>=19?7:6},Math.round(x.w));}
+   return o;
+ }
+-function scene(h){
++function scene(h){ // the house seen slightly from above and from the garden
+   const L=h.live||{},C=h.se_cloud,M=h.mppt||[];
+-  let se=[];if(C&&C.opt&&C.opt.length){const wp=C.peak_kw?C.peak_kw*1000/C.opt.length:400;se=C.opt.map(o=>({w:C.valid?(o.st?0:o.p):null,wp}));}
++  let se=[];if(C&&C.opt&&C.opt.length){const wp=C.peak_kw?C.peak_kw*1000/C.opt.length:400,order=seOrder(C);
++    se=order.map(sn=>{const o=C.opt.find(z=>z.sn===sn)||{};return {w:C.valid?(o.st?0:o.p):null,wp};});}
+   const seN=se.length||11;
+   let hm=[];M.forEach(m=>{const ps=(m.panels||[]).length?m.panels:[{p:m.p,wp:0}];ps.forEach(e=>hm.push({w:m.reachable?e.p:null,wp:e.wp}));});
+   const hmN=hm.length||8,fmt=v=>v==null?'–':w(v);
++  const T=(x,y)=>[20+(x-40),10+(y-40)*0.42],TP=pts=>pts.map(([x,y])=>T(x,y).map(v=>v.toFixed(1)).join(',')).join(' ');
++  const panel=(cx,cy,w2,h2,x,own)=>{const q=[[cx-w2/2,cy-h2/2],[cx+w2/2,cy-h2/2],[cx+w2/2,cy+h2/2],[cx-w2/2,cy+h2/2]],c=T(cx,cy);
++    let o=SV('polygon',{class:own?'pv':'pv nb',points:TP(q)});const f=own&&x&&x.wp&&x.w>0?Math.min(1,x.w/x.wp):0;
++    if(f>0)o+=SV('polygon',{class:'pvh',points:TP(q),'fill-opacity':(0.12+f*0.6).toFixed(2)});
++    if(own&&x&&x.w!=null&&w2>=24&&h2*0.42>=9.5)o+=SV('text',{class:'pvt',x:c[0].toFixed(1),y:(c[1]+2.7).toFixed(1),'font-size':7.5},Math.round(x.w));return o;};
+   let g='';
+-  // two segments of the twin house: own (x 0..245) and neighbour (245..490)
+-  for(const [x0,own] of [[0,true],[245,false]]){
+-    const X=v=>x0+v;
+-    g+=SV('rect',{class:'w1',x:X(0),y:178,width:245,height:82});                               // walls
+-    g+=SV('polygon',{class:'rf',points:`${X(4)},178 ${X(241)},178 ${X(226)},150 ${X(19)},150`}); // hip roof (front slope)
+-    g+=SV('rect',{class:'par',x:X(0),y:176,width:245,height:5});                               // parapet
+-    g+=SV('rect',{class:'wd',x:X(150),y:181,width:30,height:27})+SV('rect',{class:'wd',x:X(206),y:181,width:30,height:27}); // wood cladding
+-    [[18,26],[58,46],[185,18]].forEach(([wx,ww])=>{g+=SV('rect',{class:'win',x:X(wx),y:184,width:ww,height:18});});
+-    g+=SV('path',{class:'rail',d:`M${X(58)} 194H${X(104)}M${X(58)} 198H${X(104)}M${X(18)} 194H${X(44)}M${X(18)} 198H${X(44)}`});
+-    // roof panels
+-    const vals=own?se:[],n=own?seN:8;
+-    g+=pvGrid([X(14),176],[X(232),176],[X(26),152],n,2,vals,false).replace(own?/^$/:/class="pv"/g,own?'':'class="pv nb"').replace(own?/^$/:/<text[^>]*>[^<]*<\/text>/g,'');
+-    // terrace: lean-to roof with panels, curtains, brick pillars
+-    g+=SV('rect',{class:'cur',x:X(10),y:230,width:225,height:30});
+-    [[22,58],[92,52],[186,40]].forEach(([cx,cw])=>{g+=SV('rect',{class:'gl',x:X(cx),y:236,width:cw,height:12});});
+-    g+=SV('rect',{class:'dr',x:X(150),y:232,width:30,height:28});
+-    g+=SV('rect',{class:'br',x:X(0),y:228,width:10,height:32})+SV('rect',{class:'br',x:X(235),y:228,width:10,height:32});
+-    g+=SV('polygon',{class:'rf tr',points:`${X(-2)},230 ${X(247)},230 ${X(241)},204 ${X(4)},204`});
+-    if(own)g+=pvGrid([X(4),228],[X(241),228],[X(9),206],hmN,2,hm,true);
+-    g+=SV('rect',{class:'fas',x:X(-2),y:230,width:249,height:3});
+-  }
+-  g+=SV('text',{class:'rlab',x:128,y:191},'SolarEdge')+SV('text',{class:'rval',x:128,y:201},fmt(L.se_valid?L.se_w:null));
+-  g+=SV('text',{class:'rval lt',x:118,y:253},'Hoymiles '+fmt(L.hoy_reachable?L.hoy_w:null));
++  // garden
++  g+=SV('rect',{class:'lawn',x:0,y:198,width:400,height:52})+SV('rect',{class:'lawn2',x:0,y:224,width:400,height:26});
++  for(let x=4;x<400;x+=11)g+=SV('circle',{class:'hedge',cx:x,cy:246,r:6.5});
++  g+=SV('path',{class:'path',d:'M226 198L222 250'})+SV('circle',{class:'tree2',cx:392,cy:176,r:24})+SV('circle',{class:'tree2',cx:374,cy:198,r:15});
++  // facade (two storeys) of both segments
++  g+=SV('rect',{class:'w1',x:10,y:101,width:420,height:92});
++  [[28,16,24],[52,34,24],[108,14,24],[188,16,24],[248,16,24],[272,34,24],[330,14,24]].forEach(([x,w2,h2])=>{g+=SV('rect',{class:'win',x,y:107,width:w2,height:h2});});
++  g+=SV('rect',{class:'wd',x:150,y:104,width:26,height:31})+SV('rect',{class:'wd',x:208,y:104,width:12,height:31})+SV('rect',{class:'wd',x:372,y:104,width:26,height:31});
++  g+=SV('path',{class:'rail',d:'M52 121H86M52 125H86M52 129H86M272 121H306M272 125H306M272 129H306'});
++  // flat roof with parapet and the M-shaped tiled roof
++  g+=SV('polygon',{class:'flat',points:TP([[30,30],[450,30],[450,260],[30,260]])});
++  g+=SV('rect',{class:'well',x:T(200,34)[0],y:T(200,34)[1],width:80,height:(86*0.42).toFixed(1)});
++  g+=SV('polygon',{class:'f3',points:TP([[40,40],[110,70],[110,160],[40,250]])})+SV('polygon',{class:'f1',points:TP([[40,40],[200,40],[110,70]])})+SV('polygon',{class:'f3',points:TP([[110,70],[200,40],[200,120],[110,160]])});
++  g+=SV('polygon',{class:'f3',points:TP([[370,70],[280,40],[280,120],[370,160]])})+SV('polygon',{class:'f1',points:TP([[280,40],[440,40],[370,70]])})+SV('polygon',{class:'f3',points:TP([[440,40],[370,70],[370,160],[440,250]])});
++  g+=SV('polygon',{class:'f1',points:TP([[110,160],[200,120],[280,120],[370,160]])})+SV('polygon',{class:'f2',points:TP([[40,250],[440,250],[370,160],[110,160]])});
++  NB_SLOTS.forEach(([x,y,w2,h2])=>{g+=panel(x,y,w2,h2,null,false);});
++  roofSlots(seN).forEach((sl,k)=>{g+=panel(sl[0],sl[1],sl[2],sl[3],se[k],true);});
++  g+=SV('rect',{class:'pare',x:10,y:T(0,260)[1],width:420,height:2.5});
++  // labels on the facade
++  g+=SV('text',{class:'rlab',x:128,y:116},'SolarEdge')+SV('text',{class:'rval',x:128,y:127},fmt(L.se_valid?L.se_w:null));
++  // terrace: lean-to roof with the Hoymiles panels, curtains, brick pillars, deck
++  g+=SV('rect',{class:'deck',x:10,y:192,width:208,height:9})+SV('rect',{class:'deck',x:224,y:192,width:196,height:9});
++  g+=SV('rect',{class:'cur',x:16,y:170,width:196,height:23});
++  [[24,52],[84,48],[170,34]].forEach(([x,w2])=>{g+=SV('rect',{class:'gl',x,y:175,width:w2,height:11});});
++  g+=SV('rect',{class:'dr',x:140,y:171,width:24,height:22})+SV('rect',{class:'br',x:10,y:168,width:7,height:26})+SV('rect',{class:'br',x:211,y:168,width:7,height:26});
++  g+=SV('polygon',{class:'rf tr',points:'6,171 222,171 216,140 12,140'});
++  g+=pvGrid([9,169.5],[219,169.5],[14,141.5],hmN,2,hm,true);
++  g+=SV('rect',{class:'fas',x:6,y:171,width:216,height:3});
++  g+=SV('text',{class:'rval lt',x:112,y:214},'Hoymiles '+fmt(L.hoy_reachable?L.hoy_w:null));
+   $('houseG').innerHTML=g;
+ }
+ let tMode='days';
+-- 
+2.43.0
+
