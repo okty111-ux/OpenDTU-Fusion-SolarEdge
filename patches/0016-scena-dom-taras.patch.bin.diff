@@ -1,0 +1,119 @@
+From 968a78cac08f415154a766221c6f2b037e6dd576 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 13:04:09 +0100
+Subject: [PATCH] Dashboard scene: real panels on the house roof and the
+ terrace roof
+
+The house picture at the top of the dashboard now draws exactly as many panels
+as are read: SolarEdge optimizers (cloud) on the house roof, Hoymiles panels on
+a terrace roof next to the house, each with its live power in W and a glow by
+its share of rated power, plus the power of each inverter below.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 67 ++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 54 insertions(+), 13 deletions(-)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index c3dda0a4..f0030aa7 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -198,6 +198,12 @@ section.chart{overflow:visible}
+ .rleg{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:12px;flex-wrap:wrap}.rleg i{display:inline-block;width:120px;height:8px;border-radius:4px;background:linear-gradient(90deg,#1e293b,#1d4ed8,#0ea5e9,#facc15)}
+ .rdet{font-size:13px;margin-top:8px;min-height:2.6em}
+ @media(max-width:560px){.pv{width:40px;height:56px;font-size:12px}}
++
++.hero .pvh{fill:#ffd76a}.hero .pvt{fill:#fff;font-weight:700;text-anchor:middle;paint-order:stroke;stroke:#0b1d5c;stroke-width:1.6px;stroke-opacity:.6}
++.hero .post{stroke:var(--w2);stroke-width:3}.hero .rf.tr{fill:var(--rf)}
++.hero .rlab,.hero .rval{text-anchor:middle;font-weight:700;fill:var(--rf)}.hero .rlab{font-size:7px;opacity:.8}.hero .rval{font-size:9px}
++.hero .rlab.lt,.hero .rval.lt{fill:#fff;paint-order:stroke;stroke:#0b1d5c;stroke-width:2px;stroke-opacity:.45}
++.hero.night .rlab:not(.lt),.hero.night .rval:not(.lt){fill:#e6ebff}
+ </style>
+ </head>
+ <body>
+@@ -216,18 +222,7 @@ section.chart{overflow:visible}
+ <g class="c2"><circle cx="0" cy="236" r="42"/><circle cx="92" cy="226" r="46"/><circle cx="190" cy="240" r="38"/><circle cx="300" cy="222" r="50"/><circle cx="402" cy="238" r="40"/><circle cx="500" cy="224" r="48"/><circle cx="600" cy="238" r="40"/><circle cx="700" cy="222" r="52"/><circle cx="800" cy="238" r="42"/><rect x="0" y="234" width="800" height="26"/></g>
+ <path class="hill" d="M0 252 Q130 236 270 248 T540 244 T800 246 V260 H0Z"/>
+ <g class="tree"><path d="M560 260 L574 214 L588 260Z M590 260 L606 200 L622 260Z M728 260 L744 206 L760 260Z M756 260 L768 222 L780 260Z"/><ellipse cx="660" cy="252" rx="26" ry="12"/><ellipse cx="300" cy="254" rx="20" ry="9"/></g>
+-<g class="house">
+-<rect class="w1" x="42" y="188" width="148" height="72"/>
+-<polygon class="w2" points="190,188 258,188 258,260 190,260"/>
+-<polygon class="w3" points="190,189 226,152 262,189"/>
+-<polygon class="rf" points="30,191 195,191 230,148 65,148"/>
+-<g class="pvg"><polygon class="pv" points="41.9,184.8 66.4,184.8 81.4,170.7 56.9,170.7"/><polygon class="pv" points="59.4,168.3 83.9,168.3 98.9,154.2 74.4,154.2"/><polygon class="pv" points="71.7,184.8 96.2,184.8 111.2,170.7 86.7,170.7"/><polygon class="pv" points="89.2,168.3 113.7,168.3 128.7,154.2 104.2,154.2"/><polygon class="pv" points="101.5,184.8 126.0,184.8 141.0,170.7 116.5,170.7"/><polygon class="pv" points="119.0,168.3 143.5,168.3 158.5,154.2 134.0,154.2"/><polygon class="pv" points="131.3,184.8 155.8,184.8 170.8,170.7 146.3,170.7"/><polygon class="pv" points="148.8,168.3 173.3,168.3 188.3,154.2 163.8,154.2"/><polygon class="pv" points="161.1,184.8 185.6,184.8 200.6,170.7 176.1,170.7"/><polygon class="pv" points="178.6,168.3 203.1,168.3 218.1,154.2 193.6,154.2"/></g><g class="pvl"><line x1="49.3" y1="184.7" x2="81.5" y2="154.3"/><line x1="59.3" y1="184.7" x2="91.5" y2="154.3"/><line x1="79.1" y1="184.7" x2="111.3" y2="154.3"/><line x1="89.1" y1="184.7" x2="121.3" y2="154.3"/><line x1="108.9" y1="184.7" x2="141.1" y2="154.3"/><line x1="118.9" y1="184.7" x2="151.1" y2="154.3"/><line x1="138.7" y1="184.7" x2="170.9" y2="154.3"/><line x1="148.7" y1="184.7" x2="180.9" y2="154.3"/><line x1="168.5" y1="184.7" x2="200.7" y2="154.3"/><line x1="178.5" y1="184.7" x2="210.7" y2="154.3"/></g>
+-<line class="eave" x1="26" y1="191.5" x2="197" y2="191.5"/>
+-<rect class="win" x="54" y="204" width="48" height="56"/>
+-<path class="mul" d="M70 204V260M86 204V260M54 224H102"/>
+-<rect class="box se" x="206" y="207" width="40" height="25" rx="2"/><polygon class="sem" points="219,223 229,214 235,214 225,223"/>
+-<rect class="box" x="146" y="203" width="30" height="18" rx="2"/><rect class="hm" x="146" y="203" width="30" height="4" rx="1"/>
+-</g></svg>
++<g class="house" id="houseG"></g></svg>
+     <div class="htl"><div class="hl">Dzisiejsza produkcja</div><div class="hv" id="heroToday">–</div><div class="hs" id="heroSub"></div></div>
+     <div class="htr"><span id="heroIc"></span><span id="heroSun"></span></div>
+     <div class="ring" id="ring"><svg viewBox="0 0 120 120" aria-hidden="true"><circle class="trk" cx="60" cy="60" r="53"/><circle class="arc h" id="arcH" cx="60" cy="60" r="53"/><circle class="arc s" id="arcS" cx="60" cy="60" r="53"/></svg>
+@@ -317,7 +312,7 @@ function render(h){
+   const ev=(id,v)=>{const [a,b]=kwhU(v);$(id).innerHTML=a+'<small> '+b+'</small>'};
+   ev('eM',sum(cm));ev('eY',sum(cy));ev('eL',sum(h.lifetime));
+   $('upd').textContent=h.time_valid?'Zaktualizowano '+h.now.slice(11,16):'';
+-  mppt(h);roofs(h);tables();drawChart();
++  mppt(h);roofs(h);scene(h);tables();drawChart();
+   $('foot').textContent=`Odświeżanie co 30 s · zapis do pamięci flash co ${h.save_interval_min} min i o północy · dane lokalne, bez chmury`;
+ }
+ function mppt(h){
+@@ -363,6 +358,52 @@ function roofs(h){
+     $('rDet').innerHTML=`<b>${esc(x.n)}</b> <span class="mu">${esc(x.src)}${x.pm?' · '+esc(x.pm):''}</span><br>`+it.map(([a,b])=>`${a}: <b>${b}</b>`).join(' · ');
+     $('roofs').querySelectorAll('.pv.sel').forEach(e=>e.classList.remove('sel'));b.classList.add('sel');});
+ }
++// house scene: SolarEdge panels on the house roof, Hoymiles panels on the terrace roof next to it
++const SV=(t,a,c='')=>'<'+t+' '+Object.entries(a).map(([k,v])=>k+'="'+v+'"').join(' ')+(c?'>'+c+'</'+t+'>':'/>');
++function pvGrid(A,B,D,n,rows,vals,colMajor){ // parallelogram A=front-left, B=front-right, D=back-left
++  let o='';if(!n)return o;const cols=Math.ceil(n/rows),gx=.06,gy=.08;
++  const P=(u,v)=>[A[0]+u*(B[0]-A[0])+v*(D[0]-A[0]),A[1]+u*(B[1]-A[1])+v*(D[1]-A[1])];
++  const cw=Math.hypot(B[0]-A[0],B[1]-A[1])/cols;
++  for(let k=0;k<n;k++){const c=colMajor?Math.floor(k/rows):k%cols,r=colMajor?k%rows:Math.floor(k/cols);
++    const u0=(c+gx)/cols,u1=(c+1-gx)/cols,v0=(r+gy)/rows,v1=(r+1-gy)/rows;
++    const pts=[P(u0,v0),P(u1,v0),P(u1,v1),P(u0,v1)].map(q=>q[0].toFixed(1)+','+q[1].toFixed(1)).join(' ');
++    const x=vals[k]||{},f=x.wp&&x.w>0?Math.min(1,x.w/x.wp):0,ctr=P((u0+u1)/2,(v0+v1)/2);
++    o+=SV('polygon',{class:'pv',points:pts});
++    if(f>0)o+=SV('polygon',{class:'pvh',points:pts,'fill-opacity':(0.12+f*0.6).toFixed(2)});
++    if(x.w!=null&&cw>=13)o+=SV('text',{class:'pvt',x:ctr[0].toFixed(1),y:(ctr[1]+2.3).toFixed(1),'font-size':cw>=19?7:6},Math.round(x.w));}
++  return o;
++}
++function scene(h){
++  const L=h.live||{},C=h.se_cloud,M=h.mppt||[];
++  let se=[];if(C&&C.opt&&C.opt.length){const wp=C.peak_kw?C.peak_kw*1000/C.opt.length:400;se=C.opt.map(o=>({w:C.valid?(o.st?0:o.p):null,wp}));}
++  const seN=se.length||10;
++  let hm=[];M.forEach(m=>{const ps=(m.panels||[]).length?m.panels:[{p:m.p,wp:0}];ps.forEach(e=>hm.push({w:m.reachable?e.p:null,wp:e.wp}));});
++  const hmN=hm.length||8,hmRows=M.length&&M.every(m=>(m.panels||[]).length===2)?2:(hmN<=4?1:2);
++  const seRows=seN<=8?2:(seN<=15?3:4);
++  const fmt=v=>v==null?'–':w(v);
++  let g='';
++  // house
++  g+=SV('rect',{class:'w1',x:6,y:188,width:108,height:72});
++  g+=SV('polygon',{class:'w2',points:'114,188 158,188 158,260 114,260'});
++  g+=SV('polygon',{class:'w3',points:'114,189 136,160 158,189'});
++  g+=SV('polygon',{class:'rf',points:'0,191 118,191 140,151 22,151'});
++  g+=pvGrid([3,188.5],[115,188.5],[24,153.5],seN,seRows,se,false);
++  g+=SV('line',{class:'eave',x1:-2,y1:191.5,x2:120,y2:191.5});
++  g+=SV('rect',{class:'win',x:16,y:206,width:40,height:54});
++  g+=SV('path',{class:'mul',d:'M29.3 206V260M42.7 206V260M16 225H56'});
++  g+=SV('rect',{class:'box se',x:121,y:207,width:30,height:20,rx:2})+SV('polygon',{class:'sem',points:'131,220 139,213 144,213 136,220'});
++  g+=SV('text',{class:'rlab',x:85,y:204},'SolarEdge');
++  g+=SV('text',{class:'rval',x:85,y:216},fmt(L.se_valid?L.se_w:null));
++  // terrace roof (pergola) attached to the side wall
++  g+=SV('line',{class:'post',x1:166,y1:205,x2:166,y2:260})+SV('line',{class:'post',x1:236,y1:205,x2:236,y2:260});
++  g+=SV('polygon',{class:'rf tr',points:'158,206 240,206 246,190 158,190'});
++  g+=pvGrid([160,204],[238,204],[162,192],hmN,hmRows,hm,true);
++  g+=SV('line',{class:'eave',x1:156,y1:206.5,x2:242,y2:206.5});
++  g+=SV('rect',{class:'box',x:186,y:222,width:22,height:14,rx:2})+SV('rect',{class:'hm',x:186,y:222,width:22,height:3,rx:1});
++  g+=SV('text',{class:'rlab lt',x:201,y:246},'Hoymiles');
++  g+=SV('text',{class:'rval lt',x:201,y:257},fmt(L.hoy_reachable?L.hoy_w:null));
++  $('houseG').innerHTML=g;
++}
+ let tMode='days';
+ function tables(){
+   if(!H)return;const row=(l,r,c='')=>`<tr class="${c}"><td>${l}</td><td>${num(r.h)}</td><td>${num(r.s)}</td><td>${num(sum(r))}</td><td>${num(r.e)}</td><td>${num(r.i)}</td></tr>`;
+-- 
+2.43.0
+
