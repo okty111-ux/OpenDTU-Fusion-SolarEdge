@@ -1,0 +1,314 @@
+From 7355dcfcffa7d29a3851008078f49ef9c0bdc3a6 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 21:10:09 +0100
+Subject: [PATCH] Display: ILI9341 2.8" TFT and XPT2046 touch
+
+- display type 2: ILI9341 320x240 (same pages and driver as ST7789, other
+  orientation/colour order); 2.8" modules ship with ILI9341 or ST7789V
+- XPT2046 touch on the same SPI lines (own T_CS, T_DO, optional T_IRQ):
+  tap = next page, hold 1 s = automatic switching on/off
+- settings: new type, touch pins, sensible colour defaults per type
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/FusionDisplay.h |  8 ++++-
+ include/FusionPages.h   | 23 +++++++++----
+ src/FusionDisplay.cpp   | 73 +++++++++++++++++++++++++++++++++++++----
+ src/WebApi_sd.cpp       | 11 ++++---
+ 4 files changed, 96 insertions(+), 19 deletions(-)
+
+diff --git a/include/FusionDisplay.h b/include/FusionDisplay.h
+index 5f7ab9d9..21c6cb32 100644
+--- a/include/FusionDisplay.h
++++ b/include/FusionDisplay.h
+@@ -2,7 +2,8 @@
+ /*
+  * Display with several pages, switched with a push button or a rotary encoder:
+  *   type 0: SSD1322 256x64 OLED (monochrome)
+- *   type 1: ST7789 320x240 colour TFT (2.4"), optional EC11 rotary encoder
++ *   type 1: ST7789 320x240 colour TFT (2.4"/2.8"), optional EC11 rotary encoder
++ *   type 2: ILI9341 320x240 colour TFT (2.8"), optional XPT2046 touch
+  *
+  * Wiring (Fusion v2 SPI display header, display in 4-wire SPI mode,
+  * the TFT uses the same pins: SDA=DIN, SCL=SCLK):
+@@ -46,7 +47,9 @@ struct FdData;
+ enum FusionDisplayType : uint8_t {
+     FD_TYPE_SSD1322 = 0,
+     FD_TYPE_ST7789 = 1,
++    FD_TYPE_ILI9341 = 2,
+ };
++static inline bool fdIsTft(uint8_t t) { return t == FD_TYPE_ST7789 || t == FD_TYPE_ILI9341; }
+ 
+ struct FusionDisplayConfig {
+     bool enabled = false;
+@@ -55,6 +58,8 @@ struct FusionDisplayConfig {
+     bool tftBgr = false;    // red and blue swapped
+     int8_t blPin = -1;      // TFT backlight pin (PWM brightness), -1 = wired to 3V3
+     int8_t encA = -1, encB = -1, encSw = -1; // EC11 rotary encoder, -1 = not connected
++    // XPT2046 touch: T_CLK/T_DIN share the display SCL/SDA, own chip select and data out
++    int8_t touchCs = -1, touchDo = -1, touchIrq = -1;
+     uint16_t autoSec = 10;  // 0 = no automatic switching
+     uint16_t sleepMin = 10; // screen off at night after N min without button, 0 = never
+     uint8_t contrast = 160; // 0..255
+@@ -89,6 +94,7 @@ private:
+     void tftMarkDirty();
+     void encoderSetup();
+     int encoderSteps();
++    bool touchPressed();
+ 
+     std::mutex _mutex;
+     FusionDisplayConfig _cfg;
+diff --git a/include/FusionPages.h b/include/FusionPages.h
+index 867a7b32..e1fcbb8c 100644
+--- a/include/FusionPages.h
++++ b/include/FusionPages.h
+@@ -316,7 +316,7 @@ table.ot tr.grp td{background:var(--bg);font-weight:600;color:var(--mu);font-siz
+   <h3>Wyświetlacz</h3>
+   <p class="sub">Strony przełączasz przyciskiem BOOT (GPIO0) albo pokrętłem: obrót – następna/poprzednia strona, krótkie naciśnięcie – następna, przytrzymanie 1 s – automatyczne przełączanie wł./wył.</p>
+   <div class="form">
+-    <div><label for="dType">Typ wyświetlacza</label><select id="dType" onchange="dMode()"><option value="0">OLED SSD1322 256×64</option><option value="1">TFT 2,4" ST7789 320×240</option></select></div>
++    <div><label for="dType">Typ wyświetlacza</label><select id="dType" onchange="dMode()"><option value="0">OLED SSD1322 256×64</option><option value="1">TFT ST7789 320×240 (2,4"/2,8")</option><option value="2">TFT ILI9341 320×240 (2,8")</option></select></div>
+     <div><label class="chk"><input id="dEn" type="checkbox"> Wyświetlacz podłączony</label><label class="chk"><input id="dFlip" type="checkbox"> Obróć o 180°</label></div>
+     <div><label for="dAuto">Automatyczne przełączanie</label><select id="dAuto"><option value="0">wyłączone</option><option value="5">co 5 s</option><option value="10">co 10 s</option><option value="15">co 15 s</option><option value="30">co 30 s</option><option value="60">co 60 s</option></select></div>
+     <div><label for="dSleep">Wygaszanie w nocy</label><select id="dSleep"><option value="0">nigdy</option><option value="1">po 1 min</option><option value="5">po 5 min</option><option value="10">po 10 min</option><option value="30">po 30 min</option><option value="60">po 60 min</option></select><div class="hint">bez produkcji i bez użycia przycisku/pokrętła</div></div>
+@@ -324,7 +324,12 @@ table.ot tr.grp td{background:var(--bg);font-weight:600;color:var(--mu);font-siz
+   </div>
+   <div class="form tft" style="margin-top:12px">
+     <div><label class="chk"><input id="dInv" type="checkbox"> Odwróć kolory</label><label class="chk"><input id="dBgr" type="checkbox"> Zamień czerwony z niebieskim</label><div class="hint">zaznacz, jeśli tło jest jasne albo kolory się nie zgadzają</div></div>
+-    <div><label for="dBl">Podświetlenie BLK</label><select id="dBl" class="pin"></select></div>
++    <div><label for="dBl">Podświetlenie BLK / LED</label><select id="dBl" class="pin"></select></div>
++  </div>
++  <div class="form tft" style="margin-top:12px">
++    <div><label for="dTcs">Dotyk T_CS</label><select id="dTcs" class="pin"></select><div class="hint">moduł z dotykiem XPT2046: stuknięcie = następna strona, przytrzymanie 1 s = automatyczne przełączanie</div></div>
++    <div><label for="dTdo">Dotyk T_DO</label><select id="dTdo" class="pin"></select></div>
++    <div><label for="dTirq">Dotyk T_IRQ (opcjonalnie)</label><select id="dTirq" class="pin"></select></div>
+   </div>
+   <div class="form" style="margin-top:12px">
+     <div><label for="dEa">Pokrętło A (CLK)</label><select id="dEa" class="pin"></select></div>
+@@ -335,7 +340,7 @@ table.ot tr.grp td{background:var(--bg);font-weight:600;color:var(--mu);font-siz
+   <div id="dPages" class="pages"></div>
+   <div class="actions"><button onclick="saveDisp()">Zapisz wyświetlacz</button><button class="sec" onclick="nextDisp()">Następna strona</button></div>
+   <div class="box oled">Podłączenie do złącza wyświetlacza SPI: DIN→GPIO9, SCLK→GPIO10, CS→GPIO11, DC→GPIO12, RES→GPIO13, VCC→3V3, GND. Moduł musi być ustawiony w tryb 4-wire SPI. W OpenDTU (Ustawienia → Sprzęt) zostaw typ wyświetlacza „brak”.</div>
+-  <div class="box tft">Podłączenie TFT do złącza wyświetlacza SPI: SDA→GPIO9, SCL→GPIO10, CS→GPIO11, DC→GPIO12, RES→GPIO13, VCC→3V3, GND, BLK→3V3 (stałe podświetlenie) albo do wybranego GPIO (jasność i wygaszanie). Pokrętło EC11: A i B do dwóch wolnych GPIO, wspólny pin C do GND, SW do GPIO, drugi pin przycisku do GND (podciąganie jest w ESP). W OpenDTU (Ustawienia → Sprzęt) zostaw typ wyświetlacza „brak”.</div>
++  <div class="box tft">Podłączenie TFT do złącza wyświetlacza SPI: SDA/SDI(MOSI)→GPIO9, SCL/SCK→GPIO10, CS→GPIO11, DC/RS→GPIO12, RES/RESET→GPIO13, VCC→3V3, GND, SDO(MISO) nie podłączaj. Dotyk XPT2046: T_CLK→GPIO10 i T_DIN→GPIO9 (wspólne z ekranem), T_CS i T_DO do wybranych wolnych GPIO, T_IRQ opcjonalnie. BLK/LED→3V3 (stałe podświetlenie) albo do wybranego GPIO (jasność i wygaszanie). Pokrętło EC11: A i B do dwóch wolnych GPIO, wspólny pin C do GND, SW do GPIO, drugi pin przycisku do GND (podciąganie jest w ESP). W OpenDTU (Ustawienia → Sprzęt) zostaw typ wyświetlacza „brak”.</div>
+   <div class="box">Wolne GPIO na Fusion v2: <span id="dFree">–</span>. GPIO15 i GPIO16 zajmuje moduł RS485, jeśli SolarEdge jest podłączony przez RS485.</div>
+ </section>
+ 
+@@ -434,7 +439,10 @@ async function saveMppt(){
+   try{await post('/api/mppt/config',out);toast('Zapisano konfigurację paneli');}catch(e){toast('Błąd: '+e.message,false);}
+ }
+ 
+-function dMode(){const t=$('dType').value==='1';document.querySelectorAll('.tft').forEach(e=>e.style.display=t?'':'none');document.querySelectorAll('.oled').forEach(e=>e.style.display=t?'none':'');}
++let dPrevType=null;
++function dMode(){const t=$('dType').value!=='0';
++  if(dPrevType!==null&&dPrevType!==$('dType').value){if($('dType').value==='2'){$('dInv').checked=false;$('dBgr').checked=false;}else if($('dType').value==='1'){$('dInv').checked=true;$('dBgr').checked=false;}}
++  dPrevType=$('dType').value;document.querySelectorAll('.tft').forEach(e=>e.style.display=t?'':'none');document.querySelectorAll('.oled').forEach(e=>e.style.display=t?'none':'');}
+ async function loadDisp(){
+   const c=await get('/api/fusion/display');
+   const free=c.free_pins||[];
+@@ -442,18 +450,19 @@ async function loadDisp(){
+   $('dFree').textContent=free.length?free.map(p=>'GPIO'+p).join(', '):'brak';
+   $('dType').value=c.type||0;$('dEn').checked=c.enabled;$('dFlip').checked=c.flip;$('dAuto').value=c.auto_sec;$('dSleep').value=c.sleep_min;$('dCon').value=c.contrast;
+   $('dInv').checked=c.tft_invert!==false;$('dBgr').checked=!!c.tft_bgr;
+-  $('dBl').value=c.bl_pin??-1;$('dEa').value=c.enc_a??-1;$('dEb').value=c.enc_b??-1;$('dEs').value=c.enc_sw??-1;
++  $('dBl').value=c.bl_pin??-1;$('dEa').value=c.enc_a??-1;$('dEb').value=c.enc_b??-1;$('dEs').value=c.enc_sw??-1;$('dTcs').value=c.t_cs??-1;$('dTdo').value=c.t_do??-1;$('dTirq').value=c.t_irq??-1;dPrevType=null;
+   $('dPages').innerHTML=c.pages.map(p=>`<label class="chk"><input type="checkbox" data-p="${p.id}"${p.on?' checked':''}> ${esc(p.name)}</label>`).join('');
+   dMode();
+ }
+ async function saveDisp(){
+   let mask=0;document.querySelectorAll('#dPages input').forEach(i=>{if(i.checked)mask|=1<<+i.dataset.p;});
+   if(!mask){toast('Wybierz co najmniej jedną stronę',false);return;}
+-  const pins=[+$('dBl').value,+$('dEa').value,+$('dEb').value,+$('dEs').value].filter(p=>p>=0);
++  const pins=[+$('dBl').value,+$('dEa').value,+$('dEb').value,+$('dEs').value,+$('dTcs').value,+$('dTdo').value,+$('dTirq').value].filter(p=>p>=0);
++  if($('dTcs').value!=='-1'&&$('dTdo').value==='-1'&&$('dTirq').value==='-1'){toast('Dotyk: wybierz też T_DO albo T_IRQ',false);return;}
+   if(new Set(pins).size!==pins.length){toast('Ten sam GPIO wybrany dwa razy',false);return;}
+   if(($('dEa').value==='-1')!==($('dEb').value==='-1')){toast('Pokrętło potrzebuje obu pinów A i B',false);return;}
+   try{await post('/api/fusion/display',{enabled:$('dEn').checked,type:+$('dType').value,flip:$('dFlip').checked,auto_sec:+$('dAuto').value,sleep_min:+$('dSleep').value,contrast:+$('dCon').value,pages:mask,
+-    tft_invert:$('dInv').checked,tft_bgr:$('dBgr').checked,bl_pin:+$('dBl').value,enc_a:+$('dEa').value,enc_b:+$('dEb').value,enc_sw:+$('dEs').value});toast('Zapisano ustawienia wyświetlacza');}catch(e){toast('Błąd: '+e.message,false);}
++    tft_invert:$('dInv').checked,tft_bgr:$('dBgr').checked,bl_pin:+$('dBl').value,enc_a:+$('dEa').value,enc_b:+$('dEb').value,enc_sw:+$('dEs').value,t_cs:+$('dTcs').value,t_do:+$('dTdo').value,t_irq:+$('dTirq').value});toast('Zapisano ustawienia wyświetlacza');}catch(e){toast('Błąd: '+e.message,false);}
+ }
+ async function nextDisp(){try{await post('/api/fusion/display/next',{});}catch(e){toast('Błąd: '+e.message,false);}}
+ 
+diff --git a/src/FusionDisplay.cpp b/src/FusionDisplay.cpp
+index 7b32ebe6..304104e0 100644
+--- a/src/FusionDisplay.cpp
++++ b/src/FusionDisplay.cpp
+@@ -220,6 +220,44 @@ int FusionDisplayClass::encoderSteps()
+     return steps;
+ }
+ 
++// ---------------------------------------------------------------- XPT2046 touch
++// shares SCK (GPIO10) and MOSI (GPIO9) with the TFT; the TFT ignores the bus while its CS is high
++static uint16_t xptRead(uint8_t cmd, int8_t doPin)
++{
++    for (uint8_t i = 0; i < 8; i++) {
++        if (cmd & 0x80) pinHi(FD_PIN_MOSI); else pinLo(FD_PIN_MOSI);
++        cmd <<= 1;
++        delayMicroseconds(1);
++        pinHi(FD_PIN_SCK);
++        delayMicroseconds(1);
++        pinLo(FD_PIN_SCK);
++    }
++    pinLo(FD_PIN_MOSI);
++    uint16_t v = 0;
++    for (uint8_t i = 0; i < 16; i++) {
++        delayMicroseconds(1);
++        pinHi(FD_PIN_SCK);
++        delayMicroseconds(1);
++        v = (v << 1) | (digitalRead(doPin) ? 1 : 0);
++        pinLo(FD_PIN_SCK);
++    }
++    return v >> 3; // 12 bit result
++}
++
++bool FusionDisplayClass::touchPressed()
++{
++    if (_cfg.touchCs < 0) return false;
++    if (_cfg.touchIrq >= 0) return digitalRead(_cfg.touchIrq) == LOW; // PENIRQ: low while touched
++    if (_cfg.touchDo < 0) return false;
++    digitalWrite(_cfg.touchCs, LOW);
++    const uint16_t z1 = xptRead(0xB1, _cfg.touchDo);
++    const uint16_t z2 = xptRead(0xC1, _cfg.touchDo);
++    xptRead(0x80, _cfg.touchDo); // power down, PENIRQ enabled
++    digitalWrite(_cfg.touchCs, HIGH);
++    const int z = (int)z1 + 4095 - (int)z2;
++    return z1 > 50 && z > 600 && z < 4000;
++}
++
+ // ---------------------------------------------------------------- class
+ FusionDisplayClass::FusionDisplayClass()
+     : _loopTask(20 * TASK_MILLISECOND, TASK_FOREVER, std::bind(&FusionDisplayClass::loop, this))
+@@ -259,7 +297,11 @@ bool FusionDisplayClass::tftBegin()
+     tftCmd(0x11); tftEnd(); // sleep out
+     delay(120);
+     tftCmd1(0x3A, 0x55);    // 16 bit colour
+-    tftCmd1(0x36, (_cfg.flip ? 0xA0 : 0x60) | (_cfg.tftBgr ? 0x08 : 0x00)); // landscape 320x240
++    if (_type == FD_TYPE_ILI9341) { // landscape 320x240, the panel is BGR by default
++        tftCmd1(0x36, (_cfg.flip ? 0xE8 : 0x28) ^ (_cfg.tftBgr ? 0x08 : 0x00));
++    } else {
++        tftCmd1(0x36, (_cfg.flip ? 0xA0 : 0x60) | (_cfg.tftBgr ? 0x08 : 0x00));
++    }
+     tftCmd(_cfg.tftInvert ? 0x21 : 0x20); tftEnd();
+     tftCmd(0x13); tftEnd(); // normal mode
+     // clear to background
+@@ -278,7 +320,13 @@ bool FusionDisplayClass::tftBegin()
+     memset(_fb, FT_BG, FT_W * FT_H);
+     _hashValid = false;
+     _sendPos = 300;
+-    ESP_LOGI(TAG, "ST7789 320x240 started");
++    if (_cfg.touchCs >= 0) {
++        pinMode(_cfg.touchCs, OUTPUT);
++        digitalWrite(_cfg.touchCs, HIGH);
++    }
++    if (_cfg.touchDo >= 0) pinMode(_cfg.touchDo, INPUT);
++    if (_cfg.touchIrq >= 0) pinMode(_cfg.touchIrq, INPUT_PULLUP);
++    ESP_LOGI(TAG, "%s 320x240 started", _type == FD_TYPE_ILI9341 ? "ILI9341" : "ST7789");
+     return true;
+ }
+ 
+@@ -319,7 +367,7 @@ void FusionDisplayClass::begin()
+     if (_started) setPower(false); // other display type selected: switch over
+     _started = false;
+     _type = _cfg.type;
+-    if (_type == FD_TYPE_ST7789) {
++    if (fdIsTft(_type)) {
+         if (!tftBegin()) return;
+     } else {
+         u8g2_Setup_ssd1322_nhd_256x64_f(&s_u8g2, _cfg.flip ? U8G2_R2 : U8G2_R0, fd_byte_cb, fd_gpio_cb);
+@@ -403,7 +451,7 @@ bool FusionDisplayClass::setConfig(const FusionDisplayConfig& c)
+     if (old.blPin >= 0 && old.blPin != _cfg.blPin) {
+         analogWrite(old.blPin, 0);
+     }
+-    const bool restartTft = _started && _cfg.type == FD_TYPE_ST7789
++    const bool restartTft = _started && fdIsTft(_cfg.type)
+         && (old.flip != _cfg.flip || old.tftInvert != _cfg.tftInvert || old.tftBgr != _cfg.tftBgr);
+     if (_cfg.enabled) {
+         if (restartTft) _started = false; // re-run the init sequence with the new orientation/colours
+@@ -437,6 +485,9 @@ void FusionDisplayClass::toJson(JsonObject root)
+     root["enc_a"] = c.encA;
+     root["enc_b"] = c.encB;
+     root["enc_sw"] = c.encSw;
++    root["t_cs"] = c.touchCs;
++    root["t_do"] = c.touchDo;
++    root["t_irq"] = c.touchIrq;
+     auto freePins = root["free_pins"].to<JsonArray>();
+     for (int p = 0; p < 49; p++) if (pinAllowed(p)) freePins.add(p);
+     auto pages = root["pages"].to<JsonArray>();
+@@ -465,7 +516,8 @@ void FusionDisplayClass::loadConfig()
+     JsonDocument doc;
+     if (!deserializeJson(doc, f)) {
+         _cfg.enabled = doc["enabled"] | false;
+-        _cfg.type = (doc["type"] | 0) == FD_TYPE_ST7789 ? FD_TYPE_ST7789 : FD_TYPE_SSD1322;
++        const int t = doc["type"] | 0;
++        _cfg.type = fdIsTft(t) ? t : FD_TYPE_SSD1322;
+         _cfg.autoSec = doc["auto_sec"] | 10;
+         _cfg.sleepMin = doc["sleep_min"] | 10;
+         _cfg.contrast = doc["contrast"] | 160;
+@@ -476,6 +528,9 @@ void FusionDisplayClass::loadConfig()
+         _cfg.encA = pinOrNone(doc["enc_a"] | -1);
+         _cfg.encB = pinOrNone(doc["enc_b"] | -1);
+         _cfg.encSw = pinOrNone(doc["enc_sw"] | -1);
++        _cfg.touchCs = pinOrNone(doc["t_cs"] | -1);
++        _cfg.touchDo = pinOrNone(doc["t_do"] | -1);
++        _cfg.touchIrq = pinOrNone(doc["t_irq"] | -1);
+         _cfg.pages = doc["pages"] | 0xFF;
+         if ((doc["pv"] | 1) < 2) { // v1 had no chart page (bit 1): shift bits up, enable chart
+             const uint8_t m = _cfg.pages;
+@@ -500,6 +555,9 @@ bool FusionDisplayClass::saveConfig()
+     doc["enc_a"] = _cfg.encA;
+     doc["enc_b"] = _cfg.encB;
+     doc["enc_sw"] = _cfg.encSw;
++    doc["t_cs"] = _cfg.touchCs;
++    doc["t_do"] = _cfg.touchDo;
++    doc["t_irq"] = _cfg.touchIrq;
+     doc["pages"] = _cfg.pages;
+     doc["pv"] = 2;
+     File f = LittleFS.open(CFG_FILE, "w");
+@@ -537,11 +595,12 @@ void FusionDisplayClass::loop()
+ {
+     if (!_cfg.enabled || !_started) return;
+     const uint32_t now = millis();
+-    const bool tft = _type == FD_TYPE_ST7789;
++    const bool tft = fdIsTft(_type);
+ 
+     // ---- BOOT button or encoder push (active low, debounced)
+     bool shortPress = false, longPress = false;
+-    const bool down = digitalRead(FD_PIN_BUTTON) == LOW || (_cfg.encSw >= 0 && digitalRead(_cfg.encSw) == LOW);
++    const bool down = digitalRead(FD_PIN_BUTTON) == LOW || (_cfg.encSw >= 0 && digitalRead(_cfg.encSw) == LOW)
++        || (tft && touchPressed());
+     if (down != _btnDown && now - _btnChange > DEBOUNCE_MS) {
+         _btnDown = down;
+         _btnChange = now;
+diff --git a/src/WebApi_sd.cpp b/src/WebApi_sd.cpp
+index f0f45aae..a2175833 100644
+--- a/src/WebApi_sd.cpp
++++ b/src/WebApi_sd.cpp
+@@ -230,7 +230,7 @@ void WebApiSdClass::onDisplayPost(AsyncWebServerRequest* request)
+     c.contrast = constrain((int)(root["contrast"] | (int)c.contrast), 0, 255);
+     c.flip = root["flip"] | c.flip;
+     c.pages = (uint8_t)(root["pages"] | (int)c.pages);
+-    if (root["type"].is<int>()) c.type = root["type"].as<int>() == FD_TYPE_ST7789 ? FD_TYPE_ST7789 : FD_TYPE_SSD1322;
++    if (root["type"].is<int>()) c.type = fdIsTft(root["type"].as<int>()) ? root["type"].as<int>() : FD_TYPE_SSD1322;
+     c.tftInvert = root["tft_invert"] | c.tftInvert;
+     c.tftBgr = root["tft_bgr"] | c.tftBgr;
+     // pins: -1 = not connected, otherwise only free GPIOs, no pin used twice
+@@ -249,9 +249,12 @@ void WebApiSdClass::onDisplayPost(AsyncWebServerRequest* request)
+     c.encA = pin("enc_a", c.encA);
+     c.encB = pin("enc_b", c.encB);
+     c.encSw = pin("enc_sw", c.encSw);
+-    const int8_t used[4] = { c.blPin, c.encA, c.encB, c.encSw };
+-    for (int i = 0; i < 4; i++)
+-        for (int j = i + 1; j < 4; j++)
++    c.touchCs = pin("t_cs", c.touchCs);
++    c.touchDo = pin("t_do", c.touchDo);
++    c.touchIrq = pin("t_irq", c.touchIrq);
++    const int8_t used[7] = { c.blPin, c.encA, c.encB, c.encSw, c.touchCs, c.touchDo, c.touchIrq };
++    for (int i = 0; i < 7; i++)
++        for (int j = i + 1; j < 7; j++)
+             if (used[i] >= 0 && used[i] == used[j]) pinErr = String("GPIO") + (int)used[i] + " wybrany dwa razy";
+     if (pinErr.length()) {
+         auto& err = response->getRoot();
+-- 
+2.43.0
+
