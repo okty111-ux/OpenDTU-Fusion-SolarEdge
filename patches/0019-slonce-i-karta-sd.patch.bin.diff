@@ -1,0 +1,676 @@
+From a4b9f20b159e3466bb4116fe78630a2a6c0f177e Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 14:03:24 +0100
+Subject: [PATCH] Dashboard: sun moving along its daily path, moon at night
+
+The sun rises on the left at sunrise, is highest at solar noon and sets on
+the right at sunset (times from the OpenDTU location); at night a crescent
+moon moves from sunset to the next sunrise. Updated with every refresh.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 16ba0055..0f6b42e0 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -230,6 +230,10 @@ section.chart{overflow:visible}
+ .hwx{position:absolute;left:20px;top:104px;display:flex;align-items:center;gap:8px;max-width:58%;padding:6px 12px 6px 8px;border-radius:14px;background:#ffffff26;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);text-shadow:0 1px 6px #0003;line-height:1.15}
+ .hwx:empty{display:none}.hwx .wi{font-size:26px;line-height:1}.hwx b{display:block;font-size:20px}.hwx small{display:block;font-size:11.5px;opacity:.9}
+ @media(min-width:760px){.hwx{left:34%;top:20px;max-width:300px}}
++.hero .sun,.hero .moon{display:none!important}
++.hsun{position:absolute;z-index:-1;pointer-events:none;border-radius:50%;transition:left 1s,top 1s}
++.hsun.is-sun{width:64px;height:64px;background:radial-gradient(circle,#fff6c8 0,#ffe28a 26%,#ffd76a 30%,rgba(255,215,106,.35) 48%,rgba(255,215,106,0) 70%);transform:scale(1.9)}
++.hsun.is-moon{width:40px;height:40px;box-shadow:inset 13px -5px 0 0 #f4f1dc,0 0 24px 2px rgba(244,241,220,.18)}
+ </style>
+ </head>
+ <body>
+@@ -252,6 +256,7 @@ section.chart{overflow:visible}
+     <svg class="house2" id="houseG" viewBox="0 0 400 250" preserveAspectRatio="xMinYMax meet" aria-hidden="true"></svg>
+     <div class="htl"><div class="hl">Dzisiejsza produkcja</div><div class="hv" id="heroToday">–</div><div class="hs" id="heroSub"></div></div>
+     <div class="htr"><span id="heroIc"></span><span id="heroSun"></span></div>
++    <div class="hsun" id="hSun"></div>
+     <div class="hwx" id="heroWx"></div>
+     <div class="ring" id="ring"><svg viewBox="0 0 120 120" aria-hidden="true"><circle class="trk" cx="60" cy="60" r="53"/><circle class="arc h" id="arcH" cx="60" cy="60" r="53"/><circle class="arc s" id="arcS" cx="60" cy="60" r="53"/></svg>
+       <div class="rv"><b id="ringV">0</b><span id="ringU">kW</span></div><div class="rl">Bieżąca moc</div></div>
+@@ -326,6 +331,7 @@ function render(h){
+   $('heroIc').innerHTML=h.is_day?SUN:MOON;
+   $('heroSun').innerHTML=h.sunrise?(h.is_day?'Zachód<br><b>'+h.sunset+'</b>':'Wschód<br><b>'+h.sunrise+'</b>'):'';
+   weather(h);
++  sunPath(h);
+   const tot=+L.total_w||0;
+   if(tot>=1000){$('ringV').textContent=nf(tot/1000,2);$('ringU').textContent='kW'}else{$('ringV').textContent=Math.round(tot);$('ringU').textContent='W'}
+   const C=2*Math.PI*53,ref=Math.max(tot,pk||Math.max(+T.hp||0,+T.sp||0),1),fh=(+L.hoy_w||0)/ref,fs=(+L.se_w||0)/ref;
+@@ -538,6 +544,23 @@ async function weather(h){
+   catch(e){if(!c)el.innerHTML='';}
+   finally{WX.busy=false;}
+ }
++// sun (day) or moon (night) moving along an arc from left (sunrise / sunset) to right (sunset / sunrise)
++function sunPath(h){
++  const el=$('hSun');if(!el)return;
++  const m=v=>{const p=String(v||'').split(':');return p.length>1?(+p[0])*60+(+p[1]):NaN;};
++  const rise=m(h.sunrise),set=m(h.sunset),now=h.time_valid?m(String(h.now).slice(11,16)):NaN;
++  if(isNaN(rise)||isNaN(set)||isNaN(now)){el.style.display='none';return;}
++  let t,day=now>=rise&&now<set;
++  if(day)t=(now-rise)/(set-rise);else{const len=rise+1440-set;t=(now>=set?now-set:now+1440-set)/len;}
++  t=Math.max(0,Math.min(1,t));
++  const hero=$('hero'),W=hero.clientWidth,Hh=hero.clientHeight,sz=day?64:40;
++  const yLow=Math.min(Hh*0.42,170),yHigh=Math.max(30,Hh*0.11);
++  const x=W*(0.05+0.90*t),y=yLow-(yLow-yHigh)*Math.sin(Math.PI*t);
++  el.className='hsun '+(day?'is-sun':'is-moon');el.style.display='';
++  el.style.left=(x-sz/2).toFixed(0)+'px';el.style.top=(y-sz/2).toFixed(0)+'px';
++  el.title=day?'Słońce: wschód '+h.sunrise+', zachód '+h.sunset:'Księżyc: noc do '+h.sunrise;
++}
++addEventListener('resize',()=>{if(typeof H!=='undefined'&&H)sunPath(H);});
+ let tMode='days';
+ function tables(){
+   if(!H)return;const row=(l,r,c='')=>`<tr class="${c}"><td>${l}</td><td>${num(r.h)}</td><td>${num(r.s)}</td><td>${num(sum(r))}</td><td>${num(r.e)}</td><td>${num(r.i)}</td></tr>`;
+-- 
+2.43.0
+
+From 174c1c3a145dcfcdceb9e6a8dd01d997572a1e53 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 14:08:57 +0100
+Subject: [PATCH] History from the SD card: older days, curves and recovery
+
+- GET /api/history/power?date=YYYY-MM-DD: power curve of any day logged on
+  the card (5 minute slots, short gaps filled)
+- GET /api/history/days?from=&to=: daily totals from /fusion/dni.csv
+- /api/history: sd.mounted and sd.first (oldest day on the card)
+- dashboard: day / week / month / year navigation goes back to the oldest
+  day on the card; totals older than the 62 days in flash come from the card
+- empty history in flash (e.g. after a full flash erase): days, months and
+  years are rebuilt from dni.csv once the card is mounted
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/EnergyHistory.h    |   4 +
+ include/HistoryPage.h      |  44 ++++--
+ include/SdHistory.h        |  43 ++++++
+ include/WebApi_solaredge.h |   1 +
+ src/EnergyHistory.cpp      |  26 ++++
+ src/SdHistory.cpp          | 281 +++++++++++++++++++++++++++++++++++++
+ src/WebApi_solaredge.cpp   |  31 +++-
+ src/main.cpp               |   2 +
+ 8 files changed, 417 insertions(+), 15 deletions(-)
+ create mode 100644 include/SdHistory.h
+ create mode 100644 src/SdHistory.cpp
+
+diff --git a/include/EnergyHistory.h b/include/EnergyHistory.h
+index 562b6c9c..556e4a3f 100644
+--- a/include/EnergyHistory.h
++++ b/include/EnergyHistory.h
+@@ -15,6 +15,7 @@
+ #include <ArduinoJson.h>
+ #include <TaskSchedulerDeclarations.h>
+ #include <deque>
++#include <vector>
+ #include <mutex>
+ 
+ #ifndef HISTORY_SAVE_INTERVAL_MIN
+@@ -70,6 +71,9 @@ public:
+     bool getLastClosedDay(EnergyRecord& out);
+     EnergySummary getSummary();
+     void reset();
++    // rebuild days/months/years from saved daily totals (SD card) when the
++    // history is empty; -1 = not yet (date unknown), 0 = not needed, 1 = done
++    int importDays(const std::vector<EnergyRecord>& days);
+ 
+ private:
+     void loop();
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 0f6b42e0..57af8717 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -681,34 +681,52 @@ function drawBars(rows,lab,lab2,note,unitName){
+   zui();
+   return tot;
+ }
+-function dayMap(){const m={};(H.days||[]).forEach(r=>m[r.k]=r);m[H.today.k]=H.today;return m;}
++const SDD={},SDR={};
++const sdFirst=()=>H&&H.sd&&H.sd.mounted&&H.sd.first?H.sd.first:null;
++function dayMap(){const m={};Object.keys(SDD).forEach(k=>m[k]=SDD[k]);(H.days||[]).forEach(r=>m[r.k]=r);m[H.today.k]=H.today;return m;}
++// daily totals older than the 62 days in flash come from the SD card (dni.csv)
++async function ensureSdDays(from,to){
++  const f=sdFirst();if(!f)return;const old=(H.days||[])[0];if(old&&from>=old.k)return;
++  const key=from+'|'+to;if(SDR[key])return;SDR[key]=1;
++  try{const r=await fetch('/api/history/days?from='+from+'&to='+to);if(!r.ok)return;const j=await r.json();
++    (j.days||[]).forEach(d=>{d.h=+d.h;d.s=+d.s;if(d.e!=null)d.e=+d.e;if(d.i!=null)d.i=+d.i;SDD[d.k]=d;});drawChart();}catch(e){SDR[key]=0;}
++}
+ function canPrev(){
+   if(!H)return false;const t=D(H.today.k);
+-  if(per==='d')return off<1;
+-  if(per==='w'){const oldest=(H.days||[])[0];if(!oldest)return false;const ws=new Date(t);ws.setDate(t.getDate()-((t.getDay()+6)%7)-7*(off+1)+6);return ws>=D(oldest.k);}
+-  if(per==='m'){const om=(H.months||[])[0];if(!om)return false;const d=new Date(t.getFullYear(),t.getMonth()-off-1,1);return iso(d).slice(0,7)>=om.k;}
+-  if(per==='y'){const oy=(H.years||[])[0];return oy&&(t.getFullYear()-off-1)>=+oy.k;}
++  const sf=sdFirst();
++  if(per==='d'){const k=iso(new Date(t.getFullYear(),t.getMonth(),t.getDate()-off-1));return off<1||(sf&&k>=sf);}
++  if(per==='w'){const oldest=(H.days||[])[0];let ok=oldest?oldest.k:null;if(sf&&(!ok||sf<ok))ok=sf;if(!ok)return false;const ws=new Date(t);ws.setDate(t.getDate()-((t.getDay()+6)%7)-7*(off+1)+6);return ws>=D(ok);}
++  if(per==='m'){const om=(H.months||[])[0];let ok=om?om.k:null;if(sf&&(!ok||sf.slice(0,7)<ok))ok=sf.slice(0,7);if(!ok)return false;const d=new Date(t.getFullYear(),t.getMonth()-off-1,1);return iso(d).slice(0,7)>=ok;}
++  if(per==='y'){const oy=(H.years||[])[0];let ok=oy?+oy.k:null;if(sf&&(ok==null||+sf.slice(0,4)<ok))ok=+sf.slice(0,4);return ok!=null&&(t.getFullYear()-off-1)>=ok;}
+   return false;
+ }
+ async function drawChart(){
+   if(!H)return;const t=D(H.today.k);let lab='',total=0;
+   if(per==='d'){
+-    const k=off===0?H.today.k:iso(new Date(t.getFullYear(),t.getMonth(),t.getDate()-1));
+-    lab=(off===0?'Dziś':'Wczoraj')+' · '+dayLabel(k);
+-    const r=off===0?H.today:(H.days||[]).find(x=>x.k===k);total=sum(r);
+-    drawPower(pw[off]||null);
+-    if(!pw[off]||off===0&&Date.now()-pw.t0>55000){try{const q=await fetch('/api/history/power?day='+off);if(q.ok){pw[off]=await q.json();if(off===0){pw.t0=Date.now();if(H)render(H);return;}if(per==='d')drawPower(pw[off]);}}catch(e){}}
++    const k=off===0?H.today.k:iso(new Date(t.getFullYear(),t.getMonth(),t.getDate()-off));
++    lab=(off===0?'Dziś · ':off===1?'Wczoraj · ':'')+dayLabel(k);
++    const r=off===0?H.today:dayMap()[k];total=sum(r);
++    if(!r&&off>1)ensureSdDays(k.slice(0,7)+'-01',k.slice(0,7)+'-31');
++    if(off<=1){
++      drawPower(pw[off]||null);
++      if(!pw[off]||off===0&&Date.now()-pw.t0>55000){try{const q=await fetch('/api/history/power?day='+off);if(q.ok){pw[off]=await q.json();if(off===0){pw.t0=Date.now();if(H)render(H);return;}if(per==='d'&&off===1)drawPower(pw[off]);}}catch(e){}}
++    }else{ // older day: curve from the SD card
++      const ck='sd'+k;drawPower(pw[ck]&&!pw[ck].error?pw[ck]:null);
++      if(!pw[ck]){try{const q=await fetch('/api/history/power?date='+k);if(q.ok){pw[ck]=await q.json();if(per==='d'&&!pw[ck].error&&iso(new Date(t.getFullYear(),t.getMonth(),t.getDate()-off))===k)drawPower(pw[ck]);}}catch(e){}}
++      if(pw[ck]&&pw[ck].error)$('chS').textContent='Brak zapisu z tego dnia na karcie SD';
++      if(!r&&pw[ck]&&!pw[ck].error){let wh=0;pw[ck].hoy.concat(pw[ck].se).forEach(v=>{if(v)wh+=v*pw[ck].step_min/60;});total=wh/1000;}
++    }
+   }else if(per==='w'){
+     const m=dayMap(),ws=new Date(t);ws.setDate(t.getDate()-((t.getDay()+6)%7)-7*off);const ks=[];
+     for(let i=0;i<7;i++){const d=new Date(ws);d.setDate(ws.getDate()+i);ks.push(iso(d));}
+-    lab=dd(D(ks[0]))+' – '+dd(D(ks[6]))+'.'+ks[6].slice(0,4);
++    lab=dd(D(ks[0]))+' – '+dd(D(ks[6]))+'.'+ks[6].slice(0,4);ensureSdDays(ks[0],ks[6]);
+     total=drawBars(ks.map(k=>m[k]||null),i=>DOW[D(ks[i]).getDay()],i=>dayLabel(ks[i]),'Brak danych z tego tygodnia','dzień');
+   }else if(per==='m'){
+     const m=dayMap(),mm=new Date(t.getFullYear(),t.getMonth()-off,1),key=iso(mm).slice(0,7),nd=new Date(mm.getFullYear(),mm.getMonth()+1,0).getDate();
+     const ks=[];for(let i=1;i<=nd;i++)ks.push(key+'-'+String(i).padStart(2,'0'));
+-    lab=MON[mm.getMonth()]+' '+mm.getFullYear();
++    lab=MON[mm.getMonth()]+' '+mm.getFullYear();ensureSdDays(ks[0],ks[ks.length-1]);
+     const rows=ks.map(k=>m[k]||null);const mrow=(H.months||[]).find(r=>r.k===key);
+-    drawBars(rows,i=>String(i+1),i=>dayLabel(ks[i]),mrow?'Dni starsze niż 62 dni nie są przechowywane':'Brak danych','dzień');
++    drawBars(rows,i=>String(i+1),i=>dayLabel(ks[i]),mrow?(sdFirst()?'Brak zapisu dni z tego miesiąca na karcie SD':'Dni starsze niż 62 dni są tylko na karcie SD (włóż kartę)'):'Brak danych','dzień');
+     total=mrow?sum(mrow):rows.reduce((a,r)=>a+sum(r),0);
+   }else if(per==='y'){
+     const yy=t.getFullYear()-off,mm={};(H.months||[]).forEach(r=>mm[r.k]=r);const ks=[];for(let i=1;i<=12;i++)ks.push(yy+'-'+String(i).padStart(2,'0'));
+diff --git a/include/SdHistory.h b/include/SdHistory.h
+new file mode 100644
+index 00000000..acc046cd
+--- /dev/null
++++ b/include/SdHistory.h
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * History from the microSD card (files written by SdLogger):
++ *  - power curve of any logged day (/fusion/YYYY/YYYY-MM-DD.csv) in the same
++ *    format as PowerLog (5 minute slots)
++ *  - daily totals older than the 62 days kept in flash (/fusion/dni.csv)
++ *  - if the history in flash is empty (e.g. after a full flash erase), the
++ *    days, months and years are rebuilt from dni.csv
++ */
++#pragma once
++
++#include <Arduino.h>
++#include <ArduinoJson.h>
++#include <TaskSchedulerDeclarations.h>
++#include <mutex>
++#include <vector>
++
++struct EnergyRecord;
++
++class SdHistoryClass {
++public:
++    SdHistoryClass();
++    void init(Scheduler& scheduler);
++    // date "YYYY-MM-DD"; false if the card has no file for that day
++    bool dayCurve(const String& date, JsonObject root);
++    // daily totals from dni.csv, from..to inclusive ("YYYY-MM-DD")
++    bool days(const String& from, const String& to, JsonArray out);
++    // {"mounted":true,"first":"YYYY-MM-DD"} for /api/history
++    void statusToJson(JsonObject o);
++
++private:
++    void loop();
++    bool readDays(std::vector<EnergyRecord>& out, const String& from, const String& to);
++    String findFirst();
++
++    Task _task;
++    std::mutex _mutex;
++    String _first;
++    uint32_t _firstMs = 0;
++    bool _importDone = false;
++};
++
++extern SdHistoryClass SdHistory;
+diff --git a/include/WebApi_solaredge.h b/include/WebApi_solaredge.h
+index c146074c..94139499 100644
+--- a/include/WebApi_solaredge.h
++++ b/include/WebApi_solaredge.h
+@@ -16,4 +16,5 @@ private:
+     void onHistoryGet(AsyncWebServerRequest* request);
+     void onHistoryReset(AsyncWebServerRequest* request);
+     void onPowerGet(AsyncWebServerRequest* request);
++    void onSdDaysGet(AsyncWebServerRequest* request);
+ };
+diff --git a/src/EnergyHistory.cpp b/src/EnergyHistory.cpp
+index 6460ef20..37030862 100644
+--- a/src/EnergyHistory.cpp
++++ b/src/EnergyHistory.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ #include "EnergyHistory.h"
++#include <algorithm>
+ #include "SolarEdgeCloud.h"
++#include "SdHistory.h"
+ #include "Configuration.h"
+ #include "Datastore.h"
+ #include "HoymilesChannels.h"
+@@ -277,6 +279,29 @@ bool EnergyHistoryClass::load()
+     return true;
+ }
+ 
++int EnergyHistoryClass::importDays(const std::vector<EnergyRecord>& days)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    if (!_date[0]) return -1;
++    if (!_days.empty() || !_months.empty() || !_years.empty() || days.empty()) return 0;
++    std::vector<EnergyRecord> v(days);
++    std::sort(v.begin(), v.end(), [](const EnergyRecord& a, const EnergyRecord& b) { return strcmp(a.key, b.key) < 0; });
++    for (auto& d : v) {
++        if (strlen(d.key) != 10 || strcmp(d.key, _date) >= 0) continue; // only finished days
++        if (_days.empty() || strcmp(_days.back().key, d.key) != 0) {
++            _days.push_back(d);
++            while (_days.size() > HISTORY_MAX_DAYS) _days.pop_front();
++        }
++        char month[8], year[5];
++        strlcpy(month, d.key, sizeof(month));
++        strlcpy(year, d.key, sizeof(year));
++        addTo(_months, month, d, HISTORY_MAX_MONTHS);
++        addTo(_years, year, d, HISTORY_MAX_YEARS);
++    }
++    save();
++    return 1;
++}
++
+ void EnergyHistoryClass::reset()
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+@@ -311,6 +336,7 @@ void EnergyHistoryClass::toJson(JsonVariant root)
+         root["sunset"] = buf;
+     }
+     root["is_day"] = SunPosition.isDayPeriod();
++    SdHistory.statusToJson(root["sd"].to<JsonObject>());
+     {   // location for the outdoor weather on the dashboard (rounded to ~1 km)
+         const auto& ntp = Configuration.get().Ntp;
+         if (ntp.Latitude != 0 || ntp.Longitude != 0) {
+diff --git a/src/SdHistory.cpp b/src/SdHistory.cpp
+new file mode 100644
+index 00000000..002b5ef3
+--- /dev/null
++++ b/src/SdHistory.cpp
+@@ -0,0 +1,281 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "SdHistory.h"
++#include "EnergyHistory.h"
++#include "PowerLog.h"
++#include "SdLogger.h"
++#include <SD_MMC.h>
++#include <map>
++
++#undef TAG
++static const char* TAG = "sdhist";
++
++SdHistoryClass SdHistory;
++
++#if SD_CSV_DECIMAL_COMMA
++static const char SEP = ';';
++#else
++static const char SEP = ',';
++#endif
++
++static void splitLine(const String& l, std::vector<String>& f)
++{
++    f.clear();
++    int s = 0;
++    for (;;) {
++        const int e = l.indexOf(SEP, s);
++        if (e < 0) {
++            f.push_back(l.substring(s));
++            break;
++        }
++        f.push_back(l.substring(s, e));
++        s = e + 1;
++    }
++}
++
++static float toF(const String& s)
++{
++    if (s.isEmpty()) return NAN;
++    String t = s;
++    t.replace(',', '.');
++    return t.toFloat();
++}
++
++static int col(const std::vector<String>& h, const char* name)
++{
++    for (size_t i = 0; i < h.size(); i++) {
++        if (h[i] == name) return i;
++    }
++    return -1;
++}
++
++static String readLine(File& f)
++{
++    String l = f.readStringUntil('\n');
++    l.trim();
++    return l;
++}
++
++SdHistoryClass::SdHistoryClass()
++    : _task(30 * TASK_SECOND, TASK_FOREVER, std::bind(&SdHistoryClass::loop, this))
++{
++}
++
++void SdHistoryClass::init(Scheduler& scheduler)
++{
++    scheduler.addTask(_task);
++    _task.enable();
++}
++
++bool SdHistoryClass::dayCurve(const String& date, JsonObject root)
++{
++    if (!SdLogger.isMounted() || date.length() != 10) return false;
++    const String path = String(SD_LOG_ROOT "/") + date.substring(0, 4) + "/" + date + ".csv";
++    std::vector<float> sh(POWERLOG_SLOTS, 0), ss(POWERLOG_SLOTS, 0);
++    std::vector<uint8_t> ch(POWERLOG_SLOTS, 0), cs(POWERLOG_SLOTS, 0);
++    {
++        std::lock_guard<std::mutex> lock(SdLogger.fsMutex());
++        if (!SD_MMC.exists(path)) return false;
++        File f = SD_MMC.open(path, FILE_READ);
++        if (!f) return false;
++        std::vector<String> fld;
++        int iT = -1, iH = -1, iS = -1;
++        while (f.available()) {
++            const String l = readLine(f);
++            if (l.isEmpty()) continue;
++            splitLine(l, fld);
++            if (!fld.empty() && fld[0] == "czas") { // header (repeated if the MPPT layout changed)
++                iT = col(fld, "czas");
++                iH = col(fld, "hoymiles_W");
++                iS = col(fld, "solaredge_W");
++                continue;
++            }
++            if (iT < 0 || (int)fld.size() <= iT || fld[iT].length() < 16) continue;
++            const int hh = fld[iT].substring(11, 13).toInt(), mm = fld[iT].substring(14, 16).toInt();
++            const int slot = (hh * 60 + mm) / POWERLOG_STEP_MIN;
++            if (slot < 0 || slot >= POWERLOG_SLOTS) continue;
++            if (iH >= 0 && iH < (int)fld.size()) {
++                const float v = toF(fld[iH]);
++                if (!isnan(v) && ch[slot] < 255) { sh[slot] += v; ch[slot]++; }
++            }
++            if (iS >= 0 && iS < (int)fld.size()) {
++                const float v = toF(fld[iS]);
++                if (!isnan(v) && cs[slot] < 255) { ss[slot] += v; cs[slot]++; }
++            }
++        }
++        f.close();
++    }
++    // averages; short gaps (logging interval > 5 min) filled linearly, up to 30 min
++    auto finish = [](std::vector<float>& sum, std::vector<uint8_t>& cnt, JsonArray out) {
++        int last = -1;
++        for (int i = 0; i < POWERLOG_SLOTS; i++) {
++            if (!cnt[i]) continue;
++            sum[i] /= cnt[i];
++            if (last >= 0 && i - last > 1 && i - last <= 6) {
++                for (int k = last + 1; k < i; k++) {
++                    sum[k] = sum[last] + (sum[i] - sum[last]) * (k - last) / (i - last);
++                    cnt[k] = 1;
++                }
++            }
++            last = i;
++        }
++        for (int i = 0; i < POWERLOG_SLOTS; i++) {
++            if (cnt[i]) out.add((int)lroundf(sum[i] < 0 ? 0 : sum[i])); else out.add(nullptr);
++        }
++    };
++    root["date"] = date;
++    root["step_min"] = POWERLOG_STEP_MIN;
++    root["src"] = "sd";
++    finish(sh, ch, root["hoy"].to<JsonArray>());
++    finish(ss, cs, root["se"].to<JsonArray>());
++    return true;
++}
++
++bool SdHistoryClass::readDays(std::vector<EnergyRecord>& out, const String& from, const String& to)
++{
++    if (!SdLogger.isMounted()) return false;
++    std::map<String, EnergyRecord> m; // later rows win (a day written twice)
++    {
++        std::lock_guard<std::mutex> lock(SdLogger.fsMutex());
++        File f = SD_MMC.open(SD_LOG_ROOT "/dni.csv", FILE_READ);
++        if (!f) return false;
++        std::vector<String> fld;
++        int iD = -1, iH = -1, iS = -1, iE = -1, iI = -1, iHp = -1, iSp = -1;
++        while (f.available()) {
++            const String l = readLine(f);
++            if (l.isEmpty()) continue;
++            splitLine(l, fld);
++            if (!fld.empty() && fld[0] == "dzien") {
++                iD = 0;
++                iH = col(fld, "hoymiles_kWh");
++                iS = col(fld, "solaredge_kWh");
++                iE = col(fld, "eksport_kWh");
++                iI = col(fld, "import_kWh");
++                iHp = col(fld, "hoymiles_max_W");
++                iSp = col(fld, "solaredge_max_W");
++                continue;
++            }
++            if (iD < 0 || fld[0].length() != 10) continue;
++            if ((from.length() && fld[0] < from) || (to.length() && fld[0] > to)) continue;
++            EnergyRecord r;
++            strlcpy(r.key, fld[0].c_str(), sizeof(r.key));
++            auto get = [&](int i, float def) {
++                if (i < 0 || i >= (int)fld.size()) return def;
++                const float v = toF(fld[i]);
++                return isnan(v) ? def : v;
++            };
++            r.hoy = get(iH, 0);
++            r.se = get(iS, 0);
++            r.exp = get(iE, -1);
++            r.imp = get(iI, -1);
++            r.hoyPeak = get(iHp, 0);
++            r.sePeak = get(iSp, 0);
++            m[fld[0]] = r;
++            if (m.size() > 4000) break;
++        }
++        f.close();
++    }
++    for (auto& kv : m) out.push_back(kv.second);
++    return true;
++}
++
++bool SdHistoryClass::days(const String& from, const String& to, JsonArray out)
++{
++    std::vector<EnergyRecord> v;
++    if (!readDays(v, from, to)) return false;
++    size_t n = 0;
++    for (auto& r : v) {
++        if (++n > 400) break;
++        auto o = out.add<JsonObject>();
++        o["k"] = static_cast<const char*>(r.key);
++        o["h"] = serialized(String(r.hoy, 3));
++        o["s"] = serialized(String(r.se, 3));
++        if (r.exp >= 0) o["e"] = serialized(String(r.exp, 3));
++        if (r.imp >= 0) o["i"] = serialized(String(r.imp, 3));
++        o["hp"] = (int)r.hoyPeak;
++        o["sp"] = (int)r.sePeak;
++    }
++    return true;
++}
++
++// oldest day on the card: first day in dni.csv or oldest daily file
++String SdHistoryClass::findFirst()
++{
++    String first;
++    std::lock_guard<std::mutex> lock(SdLogger.fsMutex());
++    File d = SD_MMC.open(SD_LOG_ROOT "/dni.csv", FILE_READ);
++    if (d) {
++        while (d.available()) {
++            const String l = readLine(d);
++            if (l.length() >= 10 && isdigit((uint8_t)l[0])) {
++                first = l.substring(0, 10);
++                break;
++            }
++        }
++        d.close();
++    }
++    File root = SD_MMC.open(SD_LOG_ROOT);
++    String year;
++    if (root && root.isDirectory()) {
++        for (File e = root.openNextFile(); e; e = root.openNextFile()) {
++            String n = e.name();
++            const int sl = n.lastIndexOf('/');
++            if (sl >= 0) n = n.substring(sl + 1);
++            if (e.isDirectory() && n.length() == 4 && isdigit((uint8_t)n[0]) && (year.isEmpty() || n < year)) year = n;
++            e.close();
++        }
++        root.close();
++    }
++    if (year.length()) {
++        File y = SD_MMC.open(String(SD_LOG_ROOT "/") + year);
++        if (y && y.isDirectory()) {
++            for (File e = y.openNextFile(); e; e = y.openNextFile()) {
++                String n = e.name();
++                const int sl = n.lastIndexOf('/');
++                if (sl >= 0) n = n.substring(sl + 1);
++                if (n.length() == 14 && n.endsWith(".csv")) {
++                    const String k = n.substring(0, 10);
++                    if (first.isEmpty() || k < first) first = k;
++                }
++                e.close();
++            }
++            y.close();
++        }
++    }
++    return first;
++}
++
++void SdHistoryClass::statusToJson(JsonObject o)
++{
++    const bool m = SdLogger.isMounted();
++    o["mounted"] = m;
++    std::lock_guard<std::mutex> lock(_mutex);
++    if (m && _first.length()) o["first"] = _first;
++}
++
++void SdHistoryClass::loop()
++{
++    if (!SdLogger.isMounted()) {
++        std::lock_guard<std::mutex> lock(_mutex);
++        _first = "";
++        _firstMs = 0;
++        return;
++    }
++    if (_firstMs == 0 || millis() - _firstMs > 3600000UL) {
++        const String f = findFirst();
++        std::lock_guard<std::mutex> lock(_mutex);
++        _first = f;
++        _firstMs = millis() | 1;
++    }
++    if (!_importDone) {
++        std::vector<EnergyRecord> v;
++        if (readDays(v, "", "")) {
++            const int r = EnergyHistory.importDays(v);
++            if (r >= 0) {
++                _importDone = true;
++                if (r > 0) ESP_LOGI(TAG, "history rebuilt from the card: %u days", (unsigned)v.size());
++            }
++        } else {
++            _importDone = true; // no dni.csv
++        }
++    }
++}
+diff --git a/src/WebApi_solaredge.cpp b/src/WebApi_solaredge.cpp
+index 2331cb17..c102c497 100644
+--- a/src/WebApi_solaredge.cpp
++++ b/src/WebApi_solaredge.cpp
+@@ -12,6 +12,8 @@
+ #include "Datastore.h"
+ #include "EnergyHistory.h"
+ #include "PowerLog.h"
++#include "SdHistory.h"
++#include "SdLogger.h"
+ #include "HistoryPage.h"
+ #include "SolarEdge.h"
+ #include "WebApi.h"
+@@ -24,6 +26,7 @@ void WebApiSolarEdgeClass::init(AsyncWebServer& server, Scheduler& scheduler)
+     server.on("/api/solaredge/status", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onStatus, this, _1)));
+     server.on("/api/solaredge/config", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onConfigGet, this, _1)));
+     server.on("/history", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onHistoryPage, this, _1)));
++    server.on("/api/history/days", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onSdDaysGet, this, _1)));
+     server.on("/api/history/power", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onPowerGet, this, _1)));
+     server.on("/api/history/reset", HTTP_POST, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onHistoryReset, this, _1)));
+     server.on("/api/history", HTTP_GET, static_cast<ArRequestHandlerFunction>(std::bind(&WebApiSolarEdgeClass::onHistoryGet, this, _1)));
+@@ -188,14 +191,38 @@ void WebApiSolarEdgeClass::onHistoryReset(AsyncWebServerRequest* request)
+     WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
+ }
+ 
+-// GET /api/history/power?day=0 (today) | 1 (yesterday)
++// GET /api/history/power?day=0 (today) | 1 (yesterday) | date=YYYY-MM-DD (SD card)
+ void WebApiSolarEdgeClass::onPowerGet(AsyncWebServerRequest* request)
+ {
+     if (!WebApi.checkCredentialsReadonly(request)) {
+         return;
+     }
+-    const uint8_t which = request->hasParam("day") && request->getParam("day")->value() == "1" ? 1 : 0;
+     AsyncJsonResponse* response = new AsyncJsonResponse();
++    if (request->hasParam("date")) { // any older day: from the SD card
++        const String date = request->getParam("date")->value();
++        if (!SdHistory.dayCurve(date, response->getRoot().as<JsonObject>())) {
++            response->getRoot()["date"] = date;
++            response->getRoot()["error"] = SdLogger.isMounted() ? "no data" : "no card";
++        }
++        WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++        return;
++    }
++    const uint8_t which = request->hasParam("day") && request->getParam("day")->value() == "1" ? 1 : 0;
+     PowerLog.toJson(response->getRoot().as<JsonObject>(), which);
+     WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
+ }
++
++// GET /api/history/days?from=YYYY-MM-DD&to=YYYY-MM-DD   daily totals from the SD card
++void WebApiSolarEdgeClass::onSdDaysGet(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentialsReadonly(request)) {
++        return;
++    }
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    const String from = request->hasParam("from") ? request->getParam("from")->value() : String();
++    const String to = request->hasParam("to") ? request->getParam("to")->value() : String();
++    if (!SdHistory.days(from, to, response->getRoot()["days"].to<JsonArray>())) {
++        response->getRoot()["error"] = SdLogger.isMounted() ? "no dni.csv" : "no card";
++    }
++    WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++}
+diff --git a/src/main.cpp b/src/main.cpp
+index a28d5c70..7224867e 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -27,6 +27,7 @@
+ #include "PinMapping.h"
+ #include "RestartHelper.h"
+ #include "SdLogger.h"
++#include "SdHistory.h"
+ #include "SolarEdge.h"
+ #include "SolarEdgeCloud.h"
+ #include "Scheduler.h"
+@@ -150,6 +151,7 @@ void setup()
+ 
+     // microSD CSV logger (needs a free SPI bus -> *_sd firmware variant)
+     SdLogger.init(scheduler);
++    SdHistory.init(scheduler);
+     FusionDisplay.init(scheduler);
+     FusionUpdate.init(scheduler);
+     FusionTuya.init(scheduler);
+-- 
+2.43.0
+
