@@ -1,0 +1,110 @@
+From ae27dc4b60d0fb85ae1de63c6dff8796c6db1661 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 16:50:30 +0100
+Subject: [PATCH] Dashboard: real sunrise/sunset, hint when the house location
+ is not set
+
+The picture used the OpenDTU sunset type (nautical by default, meant for
+inverter polling), so the sun was still shown about an hour after the real
+sunset. /api/history now gives the official sunrise/sunset and day flag, and
+loc_default when the location is still the default one (centre of Germany);
+the dashboard then asks to set the location instead of showing the weather
+and forecast for the wrong place.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h |  4 ++--
+ src/EnergyHistory.cpp | 46 +++++++++++++++++++++++++++++++++++--------
+ 2 files changed, 40 insertions(+), 10 deletions(-)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 24028a43..212741e1 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -584,7 +584,7 @@ function skyWx(d){
+ }
+ async function weather(h){
+   const el=$('heroWx');if(!el)return;
+-  if(h.lat==null||h.lon==null){el.innerHTML='<span class="wi">🌡️</span><span><small>Ustaw położenie domu: OpenDTU → Ustawienia → Czas (szer./dł. geogr.)</small></span>';return;}
++  if(h.lat==null||h.lon==null||h.loc_default){el.innerHTML='<span class="wi">📍</span><span><b style="font-size:14px">Ustaw położenie domu</b><small>Słońce i pogoda liczą się teraz dla domyślnego miejsca (środek Niemiec). Wpisz współrzędne w OpenDTU → Ustawienia → Czas.</small></span>';return;}
+   const key='fz_wx',now=Date.now();let c=null;
+   try{c=JSON.parse(localStorage.getItem(key)||'null');}catch(e){}
+   if(c&&c.lat===h.lat&&c.lon===h.lon&&now-c.ts<15*60000){wxShow(c);return;}
+@@ -643,7 +643,7 @@ function fcAt5(pts){const out=new Array(288).fill(null);if(pts.length<2)return o
+   return out;}
+ async function forecast(h){
+   const sec=$('prog');if(!sec)return;
+-  if(h.lat==null||h.lon==null){sec.style.display='none';return;}
++  if(h.lat==null||h.lon==null||h.loc_default){sec.style.display='none';return;}
+   if(!FC.pref){FC.pref={};try{const r=await fetch('/api/fusion/prefs');if(r.ok)FC.pref=await r.json();}catch(e){}}
+   const R=fcRoofs(h).filter(x=>x.kwp>0);sec.style.display='';
+   if(!R.length){$('fcG').innerHTML='<div class="mu">Podaj moc paneli (kWp) w ustawieniach poniżej.</div>';fcSettings(h);return;}
+diff --git a/src/EnergyHistory.cpp b/src/EnergyHistory.cpp
+index 37030862..4166f488 100644
+--- a/src/EnergyHistory.cpp
++++ b/src/EnergyHistory.cpp
+@@ -1,5 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ #include "EnergyHistory.h"
++#include <cmath>
++#include "defaults.h"
++#include "Utils.h"
++#include <sunset.h>
+ #include <algorithm>
+ #include "SolarEdgeCloud.h"
+ #include "SdHistory.h"
+@@ -326,16 +330,42 @@ void EnergyHistoryClass::toJson(JsonVariant root)
+     }
+     root["time_valid"] = timeValid;
+ 
+-    struct tm s;
+-    if (SunPosition.sunriseTime(&s)) {
+-        strftime(buf, sizeof(buf), "%H:%M", &s);
+-        root["sunrise"] = buf;
++    // real (official) sunrise / sunset for the dashboard picture. SunPosition uses the
++    // "sunset type" of the time settings (nautical by default, for inverter polling),
++    // which is about 1 h after the real sunset in Poland in winter.
++    bool sunOk = false;
++    if (timeValid) {
++        const auto& ntp = Configuration.get().Ntp;
++        SunSet sun;
++        sun.setPosition(ntp.Latitude, ntp.Longitude, Utils::getTimezoneOffset() / 3600.0);
++        sun.setCurrentDate(1900 + t.tm_year, t.tm_mon + 1, t.tm_mday);
++        const double rise = sun.calcSunrise(), set = sun.calcSunset();
++        if (!std::isnan(rise) && !std::isnan(set)) {
++            const int r = (int)rise, z = (int)set, now = t.tm_hour * 60 + t.tm_min;
++            snprintf(buf, sizeof(buf), "%02d:%02d", r / 60, r % 60);
++            root["sunrise"] = buf;
++            snprintf(buf, sizeof(buf), "%02d:%02d", z / 60, z % 60);
++            root["sunset"] = buf;
++            root["is_day"] = now >= r && now < z;
++            sunOk = true;
++        }
+     }
+-    if (SunPosition.sunsetTime(&s)) {
+-        strftime(buf, sizeof(buf), "%H:%M", &s);
+-        root["sunset"] = buf;
++    if (!sunOk) {
++        struct tm s;
++        if (SunPosition.sunriseTime(&s)) {
++            strftime(buf, sizeof(buf), "%H:%M", &s);
++            root["sunrise"] = buf;
++        }
++        if (SunPosition.sunsetTime(&s)) {
++            strftime(buf, sizeof(buf), "%H:%M", &s);
++            root["sunset"] = buf;
++        }
++        root["is_day"] = SunPosition.isDayPeriod();
++    }
++    {   // location is still the default one (centre of Germany) -> tell the dashboard
++        const auto& ntp = Configuration.get().Ntp;
++        root["loc_default"] = fabsf(ntp.Latitude - NTP_LATITUDE) < 0.001f && fabsf(ntp.Longitude - NTP_LONGITUDE) < 0.001f;
+     }
+-    root["is_day"] = SunPosition.isDayPeriod();
+     SdHistory.statusToJson(root["sd"].to<JsonObject>());
+     {   // location for the outdoor weather on the dashboard (rounded to ~1 km)
+         const auto& ntp = Configuration.get().Ntp;
+-- 
+2.43.0
+
