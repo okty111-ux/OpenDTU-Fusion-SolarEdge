@@ -1,0 +1,99 @@
+From e44d0a43e5b7d3d4ebb804b728c0cb874fbc8989 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 10:37:03 +0100
+Subject: [PATCH] Dashboard: outdoor weather for the house location
+
+/api/history now includes the location from the OpenDTU time settings
+(rounded to ~1 km); the dashboard shows the current outdoor temperature,
+weather icon and description, feels-like temperature and wind from Open-Meteo
+(fetched by the browser, cached 15 min), or a hint where to set the location.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 29 +++++++++++++++++++++++++++++
+ src/EnergyHistory.cpp |  7 +++++++
+ 2 files changed, 36 insertions(+)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index f30feec3..16ba0055 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -227,6 +227,9 @@ section.chart{overflow:visible}
+ .hero .f1{fill:#3a3f46}.hero .f2{fill:#2b3037}.hero .f3{fill:#33383f}.hero .pare{fill:#9aa1a8}
+ .hero .lawn{fill:var(--hill)}.hero .lawn2{fill:var(--hill);filter:brightness(.93)}.hero .hedge{fill:#3e7c3a}.hero .tree2{fill:#4f8f45}.hero .path{stroke:#d9d4c7;stroke-width:5}.hero .deck{fill:#7a4b33}
+ .hero.night .hedge,.hero.night .tree2{fill:#173455}
++.hwx{position:absolute;left:20px;top:104px;display:flex;align-items:center;gap:8px;max-width:58%;padding:6px 12px 6px 8px;border-radius:14px;background:#ffffff26;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);text-shadow:0 1px 6px #0003;line-height:1.15}
++.hwx:empty{display:none}.hwx .wi{font-size:26px;line-height:1}.hwx b{display:block;font-size:20px}.hwx small{display:block;font-size:11.5px;opacity:.9}
++@media(min-width:760px){.hwx{left:34%;top:20px;max-width:300px}}
+ </style>
+ </head>
+ <body>
+@@ -249,6 +252,7 @@ section.chart{overflow:visible}
+     <svg class="house2" id="houseG" viewBox="0 0 400 250" preserveAspectRatio="xMinYMax meet" aria-hidden="true"></svg>
+     <div class="htl"><div class="hl">Dzisiejsza produkcja</div><div class="hv" id="heroToday">–</div><div class="hs" id="heroSub"></div></div>
+     <div class="htr"><span id="heroIc"></span><span id="heroSun"></span></div>
++    <div class="hwx" id="heroWx"></div>
+     <div class="ring" id="ring"><svg viewBox="0 0 120 120" aria-hidden="true"><circle class="trk" cx="60" cy="60" r="53"/><circle class="arc h" id="arcH" cx="60" cy="60" r="53"/><circle class="arc s" id="arcS" cx="60" cy="60" r="53"/></svg>
+       <div class="rv"><b id="ringV">0</b><span id="ringU">kW</span></div><div class="rl">Bieżąca moc</div></div>
+   </div>
+@@ -321,6 +325,7 @@ function render(h){
+   const pk=peakOf(pw[0]);$('heroSub').textContent=prod?('od '+(T.first||'–')+(pk?' · szczyt '+w(pk):'')):'Brak produkcji';
+   $('heroIc').innerHTML=h.is_day?SUN:MOON;
+   $('heroSun').innerHTML=h.sunrise?(h.is_day?'Zachód<br><b>'+h.sunset+'</b>':'Wschód<br><b>'+h.sunrise+'</b>'):'';
++  weather(h);
+   const tot=+L.total_w||0;
+   if(tot>=1000){$('ringV').textContent=nf(tot/1000,2);$('ringU').textContent='kW'}else{$('ringV').textContent=Math.round(tot);$('ringU').textContent='W'}
+   const C=2*Math.PI*53,ref=Math.max(tot,pk||Math.max(+T.hp||0,+T.sp||0),1),fh=(+L.hoy_w||0)/ref,fs=(+L.se_w||0)/ref;
+@@ -509,6 +514,30 @@ function scene(h){ // the house seen slightly from above and from the garden
+   g+=SV('text',{class:'rval lt',x:112,y:214},'Hoymiles '+fmt(L.hoy_reachable?L.hoy_w:null));
+   $('houseG').innerHTML=g;
+ }
++// outdoor weather for the house location (lat/lon from the OpenDTU time settings), Open-Meteo, cached 15 min
++const WX={c:{0:['☀️','bezchmurnie'],1:['🌤️','prawie bezchmurnie'],2:['⛅','częściowe zachmurzenie'],3:['☁️','pochmurno'],45:['🌫️','mgła'],48:['🌫️','szadź'],
++  51:['🌦️','mżawka'],53:['🌦️','mżawka'],55:['🌦️','mżawka'],56:['🌧️','marznąca mżawka'],57:['🌧️','marznąca mżawka'],61:['🌧️','słaby deszcz'],63:['🌧️','deszcz'],65:['🌧️','ulewa'],
++  66:['🌧️','marznący deszcz'],67:['🌧️','marznący deszcz'],71:['🌨️','słaby śnieg'],73:['🌨️','śnieg'],75:['❄️','intensywny śnieg'],77:['🌨️','ziarna śniegu'],
++  80:['🌦️','przelotny deszcz'],81:['🌦️','przelotny deszcz'],82:['⛈️','ulewa'],85:['🌨️','przelotny śnieg'],86:['🌨️','przelotny śnieg'],95:['⛈️','burza'],96:['⛈️','burza z gradem'],99:['⛈️','burza z gradem']},busy:false};
++function wxShow(d){
++  const c=WX.c[d.code]||['🌡️',''],ic=(d.code<=2&&!d.day)?'🌙':c[0];
++  $('heroWx').innerHTML=`<span class="wi">${ic}</span><span><b>${nf(d.t,0)}°C</b><small>${esc(c[1])}${d.app!=null?' · odczuwalna '+nf(d.app,0)+'°':''}${d.wind!=null?' · wiatr '+nf(d.wind,0)+' km/h':''}</small></span>`;
++}
++async function weather(h){
++  const el=$('heroWx');if(!el)return;
++  if(h.lat==null||h.lon==null){el.innerHTML='<span class="wi">🌡️</span><span><small>Ustaw położenie domu: OpenDTU → Ustawienia → Czas (szer./dł. geogr.)</small></span>';return;}
++  const key='fz_wx',now=Date.now();let c=null;
++  try{c=JSON.parse(localStorage.getItem(key)||'null');}catch(e){}
++  if(c&&c.lat===h.lat&&c.lon===h.lon&&now-c.ts<15*60000){wxShow(c);return;}
++  if(c&&c.lat===h.lat&&c.lon===h.lon)wxShow(c);
++  if(WX.busy)return;WX.busy=true;
++  try{const r=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${h.lat}&longitude=${h.lon}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,is_day&timezone=auto`);
++    const j=await r.json(),cu=j.current||{};
++    if(cu.temperature_2m!=null){const d={lat:h.lat,lon:h.lon,ts:now,t:cu.temperature_2m,app:cu.apparent_temperature,code:cu.weather_code,wind:cu.wind_speed_10m,day:cu.is_day===1};
++      wxShow(d);try{localStorage.setItem(key,JSON.stringify(d));}catch(e){}}}
++  catch(e){if(!c)el.innerHTML='';}
++  finally{WX.busy=false;}
++}
+ let tMode='days';
+ function tables(){
+   if(!H)return;const row=(l,r,c='')=>`<tr class="${c}"><td>${l}</td><td>${num(r.h)}</td><td>${num(r.s)}</td><td>${num(sum(r))}</td><td>${num(r.e)}</td><td>${num(r.i)}</td></tr>`;
+diff --git a/src/EnergyHistory.cpp b/src/EnergyHistory.cpp
+index 718b15a0..6460ef20 100644
+--- a/src/EnergyHistory.cpp
++++ b/src/EnergyHistory.cpp
+@@ -311,6 +311,13 @@ void EnergyHistoryClass::toJson(JsonVariant root)
+         root["sunset"] = buf;
+     }
+     root["is_day"] = SunPosition.isDayPeriod();
++    {   // location for the outdoor weather on the dashboard (rounded to ~1 km)
++        const auto& ntp = Configuration.get().Ntp;
++        if (ntp.Latitude != 0 || ntp.Longitude != 0) {
++            root["lat"] = round(ntp.Latitude * 100.0) / 100.0;
++            root["lon"] = round(ntp.Longitude * 100.0) / 100.0;
++        }
++    }
+ 
+     // live
+     Counters c;
+-- 
+2.43.0
+
