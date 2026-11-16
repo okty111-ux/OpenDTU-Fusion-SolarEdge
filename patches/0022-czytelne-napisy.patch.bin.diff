@@ -1,0 +1,37 @@
+From 2bb4ba2a8030076d49f4553cfaaf7c7a695dc03d Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 07:32:07 +0100
+Subject: [PATCH] Dashboard picture: readable texts on light clouds
+
+The texts at the top of the picture (today's production, sunrise/sunset,
+weather) get a dark translucent background and a stronger shadow, darker when
+the sky is grey.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 212741e1..180dae40 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -267,6 +267,14 @@ section.chart{overflow:visible}
+ @keyframes hfl{0%,92%,96%,100%{opacity:0}93%,95%{opacity:.55}}
+ .wxi{font-size:26px;line-height:1}
+ @media(prefers-reduced-motion:reduce){.hcl i,.hpr,.hfl{animation:none}}
++/* readable top texts on light clouds */
++.htl,.htr,.hwx{background:rgba(10,28,70,.34);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);text-shadow:0 1px 3px rgba(0,0,0,.45)}
++.htl{left:12px;top:10px;padding:8px 14px 9px;border-radius:14px}
++.htr{right:12px;top:10px;padding:6px 10px;border-radius:12px}
++.hwx{border-radius:14px}.hwx small,.hs,.hl{opacity:1}
++.hero.wx-overcast .htl,.hero.wx-grey .htl,.hero.wx-overcast .htr,.hero.wx-grey .htr,.hero.wx-overcast .hwx,.hero.wx-grey .hwx{background:rgba(20,30,55,.45)}
++@media(min-width:760px){.htl{left:18px;top:16px}.htr{right:18px;top:16px}}
++@media(max-width:759px){.hwx{left:12px;top:112px}}
+ </style>
+ </head>
+ <body>
+-- 
+2.43.0
+
