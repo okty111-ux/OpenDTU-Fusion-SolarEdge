@@ -1,0 +1,1029 @@
+From df28023cd5baa566413ce0498fbdcb7cdc668e35 Mon Sep 17 00:00:00 2001
+From: Okty <okty111-ux@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 18:25:02 +0100
+Subject: [PATCH] =?UTF-8?q?Energa=20M=C3=B3j=20Licznik:=20grid=20import/ex?=
+ =?UTF-8?q?port=20from=20the=20smart=20meter=20portal?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- logs in like the Mój Licznik app (api-mojlicznik.energa-operator.pl),
+  every hour: meter totals A+/A-, today's and yesterday's hourly values;
+  once: the last 62 days
+- daily import/export go into the history (months/years corrected), today's
+  values are used while there is no local meter; new column 'Zużycie domu'
+  = production + import - export
+- page /fusion/energa (menu: Licznik Energa); the password is never sent back
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/EnergaMeter.h   |  71 ++++++
+ include/EnergyHistory.h |   5 +
+ include/FusionPages.h   | 169 ++++++++++++++-
+ include/HistoryPage.h   |   6 +-
+ include/WebApi_fusion.h |   4 +
+ src/EnergaMeter.cpp     | 465 ++++++++++++++++++++++++++++++++++++++++
+ src/EnergyHistory.cpp   |  39 ++++
+ src/WebApi_fusion.cpp   |  45 ++++
+ src/main.cpp            |   2 +
+ 9 files changed, 798 insertions(+), 8 deletions(-)
+ create mode 100644 include/EnergaMeter.h
+ create mode 100644 src/EnergaMeter.cpp
+
+diff --git a/include/EnergaMeter.h b/include/EnergaMeter.h
+new file mode 100644
+index 00000000..94fb7c66
+--- /dev/null
++++ b/include/EnergaMeter.h
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Energa Operator "Mój Licznik" (smart meter portal): energy taken from the
++ * grid (A+) and fed into the grid (A-) per hour and day, and the meter totals.
++ *
++ * Same interface as the Mój Licznik mobile app (api-mojlicznik.energa-operator.pl,
++ * unofficial). The distributor publishes the hourly values with a delay
++ * (usually the next day), so this fills the history, not the live view.
++ *
++ *  - every hour: meter totals, today and yesterday (hourly)
++ *  - once after setup: the last 62 days, so the history gets import/export
++ *  - daily values go into EnergyHistory (columns Import / Eksport)
++ */
++#pragma once
++
++#include <Arduino.h>
++#include <ArduinoJson.h>
++#include <mutex>
++#include <vector>
++
++struct EnergaConfig {
++    bool enabled = false;
++    String user;
++    String password;
++};
++
++struct EnergaDay {
++    String date;
++    float imp = -1, exp = -1;   // kWh
++    float hImp[24], hExp[24];   // kWh per hour, NAN = no data
++};
++
++class EnergaMeterClass {
++public:
++    void init();
++    EnergaConfig getConfig();
++    bool setConfig(const EnergaConfig& c, bool keepPassword);
++    void requestRefresh() { _refresh = true; }
++    void toJson(JsonVariant root);       // settings page (never the password)
++    void hourlyToJson(JsonObject root);  // today + yesterday per hour, for the dashboard
++
++private:
++    static void taskEntry(void* arg);
++    void taskLoop();
++    bool cycle();
++    bool login();
++    bool get(const String& path, String& out, int& status);
++    bool fetchMeter();
++    bool fetchDay(time_t dayStart, EnergaDay& d);
++    void setError(const String& e);
++    void load();
++    bool save();
++
++    std::mutex _mutex;
++    EnergaConfig _cfg;
++    String _deviceToken, _token;
++    std::vector<std::pair<String, String>> _cookies;
++    bool _loggedIn = false;
++    String _state = "wyłączone", _error;
++    volatile bool _refresh = false;
++    volatile bool _cfgChanged = false;
++    // meter
++    String _meterId, _obisPlus, _obisMinus, _serial, _tariff;
++    float _totalPlus = NAN, _totalMinus = NAN;
++    time_t _lastOk = 0;
++    EnergaDay _today, _yesterday;
++    int _backfillLeft = -1; // days still to fetch (-1 = not started)
++    uint32_t _requests = 0;
++};
++
++extern EnergaMeterClass EnergaMeter;
+diff --git a/include/EnergyHistory.h b/include/EnergyHistory.h
+index 556e4a3f..83a4616c 100644
+--- a/include/EnergyHistory.h
++++ b/include/EnergyHistory.h
+@@ -74,6 +74,9 @@ public:
+     // rebuild days/months/years from saved daily totals (SD card) when the
+     // history is empty; -1 = not yet (date unknown), 0 = not needed, 1 = done
+     int importDays(const std::vector<EnergyRecord>& days);
++    // grid import / export from the distributor's meter portal (Energa Mój Licznik)
++    void setGridDay(const char* key, float imp, float exp);
++    void setGridToday(const char* key, float imp, float exp);
+ 
+ private:
+     void loop();
+@@ -81,6 +84,8 @@ private:
+     void readLiveCounters(Counters& c, float& hoyW, float& seW);
+     void rollover(const char* newDate);
+     EnergyRecord todayRecord() const;
++    char _gridKey[11] = "";
++    float _gridImp = -1, _gridExp = -1;
+     static void addTo(std::deque<EnergyRecord>& list, const char* key, const EnergyRecord& day, size_t max);
+     static float delta(float now, float start);
+ 
+diff --git a/include/FusionPages.h b/include/FusionPages.h
+index e1fcbb8c..07570b9e 100644
+--- a/include/FusionPages.h
++++ b/include/FusionPages.h
+@@ -106,7 +106,7 @@ table.ot tr.grp td{background:var(--bg);font-weight:600;color:var(--mu);font-siz
+ </style>
+ </head>
+ <body>
+-<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Karta microSD</h1><div class="t" id="now"></div></div>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/energa"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h3M13 16l3-4"/></svg><span>Licznik Energa</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Karta microSD</h1><div class="t" id="now"></div></div>
+ <main>
+ <section><h3>Stan karty</h3><p class="sub" id="st">–</p>
+   <div class="actions" id="quick"></div></section>
+@@ -259,7 +259,7 @@ table.ot tr.grp td{background:var(--bg);font-weight:600;color:var(--mu);font-siz
+ </style>
+ </head>
+ <body>
+-<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Ustawienia falowników</h1><div class="t" id="now"></div></div>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/energa"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h3M13 16l3-4"/></svg><span>Licznik Energa</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Ustawienia falowników</h1><div class="t" id="now"></div></div>
+ <main>
+ 
+ <section>
+@@ -577,7 +577,7 @@ table.ot tr.grp td{background:var(--bg);font-weight:600;color:var(--mu);font-siz
+ </style>
+ </head>
+ <body>
+-<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Aktualizacja z GitHuba</h1><div class="t" id="now"></div></div>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/energa"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h3M13 16l3-4"/></svg><span>Licznik Energa</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Aktualizacja z GitHuba</h1><div class="t" id="now"></div></div>
+ <main>
+ <section>
+   <h3>Zainstalowana wersja</h3>
+@@ -756,7 +756,7 @@ table.ot tr.grp td{background:var(--bg);font-weight:600;color:var(--mu);font-siz
+ </style>
+ </head>
+ <body>
+-<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Chmura Tuya</h1><div class="t" id="now"></div></div>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/energa"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h3M13 16l3-4"/></svg><span>Licznik Energa</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Chmura Tuya</h1><div class="t" id="now"></div></div>
+ <main>
+ <section>
+   <h3>Połączenie z chmurą Tuya</h3>
+@@ -935,7 +935,7 @@ table.ot tr.grp td{background:var(--bg);font-weight:600;color:var(--mu);font-siz
+ </style>
+ </head>
+ <body>
+-<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Chmura SolarEdge</h1><div class="t" id="now"></div></div>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/energa"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h3M13 16l3-4"/></svg><span>Licznik Energa</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Chmura SolarEdge</h1><div class="t" id="now"></div></div>
+ <main>
+ <section>
+   <h3>Połączenie z portalem SolarEdge</h3>
+@@ -1004,3 +1004,162 @@ load();setInterval(load,15000);
+ </body>
+ </html>
+ )HTMLPAGE";
++
++static const char ENERGA_PAGE_HTML[] PROGMEM = R"HTMLPAGE(<!DOCTYPE html>
++<html lang="pl">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width,initial-scale=1">
++<title>Fusion – licznik Energa</title>
++<style>
++:root{--bg:#f4f6f8;--card:#fff;--tx:#1d2733;--mu:#6b7785;--bd:#e3e7ec;--ok:#1f9d55;--warn:#b7791f;--err:#c53030;--off:#5a6b7d;--acc:#2b6cb0;--in:#fff}
++@media (prefers-color-scheme:dark){:root{--bg:#12161b;--card:#1b2128;--tx:#e6ebf0;--mu:#93a0ae;--bd:#2a323c;--acc:#63a4e8;--in:#12161b}}
++*{box-sizing:border-box}
++body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx)}
++header{display:flex;flex-wrap:wrap;gap:8px 16px;justify-content:space-between;align-items:center;padding:12px 18px;background:var(--card);border-bottom:1px solid var(--bd)}
++header h1{font-size:18px;margin:0}
++nav a{color:var(--mu);text-decoration:none;margin-left:14px;font-size:14px}
++nav a.act{color:var(--acc);font-weight:600}
++nav a:first-child{margin-left:0}
++main{max-width:980px;margin:0 auto;padding:16px}
++section{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px;margin-bottom:16px;overflow-x:auto}
++section h3{margin:0 0 4px;font-size:16px}
++section .sub{color:var(--mu);font-size:13px;margin:0 0 12px}
++table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
++th,td{padding:7px 8px;border-bottom:1px solid var(--bd);text-align:right;white-space:nowrap}
++th:first-child,td:first-child{text-align:left}
++th{color:var(--mu);font-weight:500;font-size:13px}
++.mu{color:var(--mu)}
++.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;background:var(--bd);color:var(--tx)}
++.pill.ok{background:#1f9d5522;color:var(--ok)}.pill.warn{background:#b7791f22;color:var(--warn)}.pill.err{background:#c5303022;color:var(--err)}
++.form{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px 14px;align-items:end}
++label{display:block;font-size:13px;color:var(--mu);margin-bottom:4px}
++input[type=text],input[type=number],input[type=password],select{width:100%;padding:8px 10px;border:1px solid var(--bd);border-radius:8px;background:var(--in);color:var(--tx);font:inherit}
++input:focus,select:focus{outline:2px solid var(--acc);outline-offset:-1px}
++.chk{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--tx);margin:0;padding:8px 0}
++.hint{font-size:12px;color:var(--mu);margin-top:3px}
++button,.btn{display:inline-block;padding:8px 14px;border:1px solid var(--acc);border-radius:8px;background:var(--acc);color:#fff;font:inherit;font-size:14px;cursor:pointer;text-decoration:none}
++button.sec,.btn.sec{background:transparent;color:var(--acc)}
++button.del{background:transparent;color:var(--err);border-color:var(--err);padding:4px 10px;font-size:13px}
++.actions{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
++.result{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid var(--bd);font-size:14px}
++.result.ok{border-color:var(--ok);background:#1f9d5512}.result.err{border-color:var(--err);background:#c5303012}
++.box{padding:10px 12px;border-radius:8px;background:var(--bg);font-size:13px;color:var(--mu);margin-top:12px}
++#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);padding:10px 16px;border-radius:8px;background:#1d2733;color:#fff;font-size:14px;display:none}
++footer{color:var(--mu);font-size:12px;text-align:center;padding:8px 0 24px}
++@media(max-width:640px){main{padding:10px}th,td{padding:6px 5px;font-size:13px}nav a{margin-left:10px}}
++.invblk{margin-bottom:14px}.invh{font-weight:600;margin:6px 0 10px}
++.mpp{border:1px solid var(--bd);border-radius:10px;padding:10px 12px;margin-bottom:10px}
++.mph{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap}.mph select{width:auto;margin-left:auto}
++.pan{display:grid;grid-template-columns:70px minmax(120px,2fr) minmax(80px,1fr) minmax(80px,1fr);gap:8px;align-items:end;margin-top:6px}
++.pan .pl{font-size:13px;color:var(--mu);padding-bottom:9px}
++@media(max-width:560px){.pan{grid-template-columns:1fr 1fr}.pan .pl{grid-column:1/-1;padding:4px 0 0}.pan>div:nth-child(2){grid-column:1/-1}}
++.pages{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:4px 14px}
++/* ---------- app shell: left menu ---------- */
++:root{--side:#ffffff;--sideTx:#3b4654;--sideAct:#2b6cb014;--ch:#e58a12;--cs:#2f7fd0}
++@media (prefers-color-scheme:dark){:root{--side:#161b21;--sideTx:#c3ccd6;--sideAct:#63a4e81f;--ch:#f0a23a;--cs:#5aa2ea}}
++.app{display:flex;min-height:100vh}
++@media(min-width:960px){.app{background:linear-gradient(to right,var(--side) 236px,var(--bd) 236px,var(--bd) 237px,transparent 237px)}}
++.side{position:sticky;top:0;height:100vh;width:236px;flex:0 0 236px;background:var(--side);border-right:1px solid var(--bd);display:flex;flex-direction:column;padding:18px 12px;z-index:30}
++.brand{display:flex;align-items:center;gap:10px;padding:2px 8px 18px}
++.brand .mk{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#f0a23a,#2f7fd0);display:grid;place-items:center;color:#fff}
++.brand b{display:block;font-size:16px;line-height:1.1}.brand small{color:var(--mu);font-size:12px}
++.side .grp{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mu);padding:14px 10px 6px}
++.side a.it{display:flex;align-items:center;gap:11px;padding:9px 10px;margin:1px 0;border-radius:9px;color:var(--sideTx);text-decoration:none;font-size:14.5px}
++.side a.it svg{width:19px;height:19px;flex:0 0 19px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;opacity:.85}
++.side a.it:hover{background:var(--bg)}
++.side a.it.act{background:var(--sideAct);color:var(--acc);font-weight:600}
++.side a.it.act svg{opacity:1}
++.side .foot{margin-top:auto;padding:12px 10px 0;border-top:1px solid var(--bd);font-size:12px;color:var(--mu)}
++.content{flex:1;min-width:0}
++.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;padding:10px 18px;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--bd)}
++.top h1{font-size:17px;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
++.top .t{color:var(--mu);font-size:13px;white-space:nowrap}
++.burger{display:none;border:0;background:transparent;color:var(--tx);padding:6px;margin:-6px 0 -6px -6px;border-radius:8px;cursor:pointer}
++.burger svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;display:block}
++.scrim{display:none}
++@media(max-width:959px){
++ .side{position:fixed;left:0;top:0;bottom:0;height:auto;transform:translateX(-102%);transition:transform .22s ease;box-shadow:0 10px 40px #0004}
++ .side.open{transform:none}
++ .scrim{display:block;position:fixed;inset:0;background:#0006;opacity:0;pointer-events:none;transition:opacity .2s;z-index:25}
++ .scrim.on{opacity:1;pointer-events:auto}
++ .burger{display:block}
++ .top{padding:10px 14px}
++}
++@media (prefers-reduced-motion:reduce){.side{transition:none}}
++
++.side .foot .cred{display:block;margin-top:8px;padding-top:8px;border-top:1px solid var(--bd);font-size:11.5px;line-height:1.4;opacity:.85}
++.vrow{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.vbig{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--acc)}.vst{margin-left:auto}
++.notes{background:var(--bg);border-radius:10px;padding:12px 14px;font-size:14px;line-height:1.5;max-height:320px;overflow:auto}
++code{font-family:ui-monospace,Consolas,monospace;font-size:.92em;background:var(--bg);padding:1px 5px;border-radius:5px}
++.prog{margin-top:12px}.bar{height:10px;border-radius:99px;background:var(--bd);overflow:hidden;margin-bottom:6px}.bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .4s}
++.kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-top:12px}.kv div{background:var(--bg);border-radius:10px;padding:8px 12px;display:flex;flex-direction:column}.kv span{font-size:12px;color:var(--mu)}.kv b{font-variant-numeric:tabular-nums;font-size:15px;overflow-wrap:anywhere}
++.steps{padding-left:20px;line-height:1.55;font-size:14px}.steps li{margin-bottom:8px}
++table.pt{margin:8px 0 4px;font-size:13px}table.pt td,table.pt th{padding:5px 8px}
++@media(max-width:560px){table.pt th:nth-child(3),table.pt td:nth-child(3){display:none}}
++a.it .nb{margin-left:auto;background:var(--warn,#d97706);color:#fff;font-size:11px;font-weight:700;border-radius:99px;padding:1px 7px}
++main a:not(.btn){color:var(--acc)}
++table.pt th,table.pt td{text-align:left;white-space:normal}table.pt td:nth-child(2),table.pt th:nth-child(2){white-space:nowrap}
++@media(max-width:560px){.kv{grid-template-columns:1fr 1fr;gap:8px}.kv div{padding:7px 10px}.vbig{font-size:28px}}
++.tw{overflow-x:auto;-webkit-overflow-scrolling:touch}
++table.ot{width:100%;border-collapse:collapse;font-size:13px;min-width:560px}table.ot th,table.ot td{padding:6px 8px;border-bottom:1px solid var(--bd);text-align:left;vertical-align:top}
++table.ot th.r,table.ot td.r{text-align:right;white-space:nowrap}table.ot th{color:var(--mu);font-weight:500;font-size:12px}
++table.ot tr.grp td{background:var(--bg);font-weight:600;color:var(--mu);font-size:12px}table.ot tr.stale td{opacity:.5}table.ot .mu{font-size:11px;color:var(--mu)}
++</style>
++</head>
++<body>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/energa"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h3M13 16l3-4"/></svg><span>Licznik Energa</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Licznik Energa</h1><div class="t" id="now"></div></div>
++<main>
++<section>
++  <h3>Licznik Energa · Mój Licznik</h3>
++  <div class="vrow"><div class="vst" id="st"><span class="pill">–</span></div><div class="mu" id="stT"></div></div>
++  <div id="err" class="result err" style="display:none"></div>
++  <div class="kv" id="kv"></div>
++</section>
++<section>
++  <h3>Ustawienia</h3>
++  <p class="sub">Fusion loguje się do Mój Licznik (Energa Operator) tak jak aplikacja na telefon i pobiera energię pobraną z sieci (A+) i oddaną do sieci (A−) z Twojego licznika – godzina po godzinie. Energa udostępnia te dane z opóźnieniem (zwykle następnego dnia), dlatego trafiają do historii (kolumny Import, Eksport i Zużycie), a nie do bieżącej mocy. Po pierwszym połączeniu Fusion uzupełni ostatnie 62 dni.</p>
++  <div class="form">
++    <div><label class="chk"><input id="en" type="checkbox"> Pobieranie włączone</label></div>
++    <div><label for="user">E-mail (login do Mój Licznik)</label><input id="user" type="text" inputmode="email" maxlength="80" autocomplete="off" spellcheck="false"></div>
++    <div><label for="pass">Hasło do Mój Licznik</label><input id="pass" type="password" maxlength="80" autocomplete="new-password"><div class="hint" id="passH">zostaw puste, aby nie zmieniać</div></div>
++  </div>
++  <div class="actions"><button onclick="save()">Zapisz i połącz</button><button class="sec" onclick="refresh()">Pobierz teraz</button></div>
++  <div class="box">Hasło jest zapisane tylko w pamięci Fusion i nigdy nie jest pokazywane na stronie. To nieoficjalny sposób dostępu (ten sam, którego używa aplikacja Mój Licznik) – jeśli Energa go zmieni, pobieranie może przestać działać. Działa tylko dla liczników Energa Operator.</div>
++</section>
++</main>
++<div id="toast" class="toast"></div>
++<script>
++
++const $=id=>document.getElementById(id);
++function toast(t,ok=true){const e=$('toast');e.textContent=t;e.style.background=ok?'#1f7a45':'#9b2c2c';e.style.display='block';clearTimeout(e._t);e._t=setTimeout(()=>e.style.display='none',3500);}
++async function get(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(r.status);return r.json();}
++async function post(u,obj){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(JSON.stringify(obj||{}))});const j=await r.json().catch(()=>({}));if(!r.ok||j.type==='warning'||j.type==='danger')throw new Error(j.message||r.status);return j;}
++const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
++const nf=(v,d=0)=>v==null?'–':Number(v).toLocaleString('pl-PL',{minimumFractionDigits:d,maximumFractionDigits:d});
++const kwh=wh=>wh==null?'–':(wh>=1e6?nf(wh/1e6,2)+' MWh':nf(wh/1000,2)+' kWh');
++let filled=false;
++const kwh3=v=>v==null?'–':nf(v,3)+' kWh';
++function render(c){
++  const s=!c.enabled?['wyłączone','']:(c.state==='połączono'?['połączono','ok']:(c.state==='błąd'?['błąd','err']:[c.state,'']));
++  $('st').innerHTML=`<span class="pill ${s[1]}">${esc(s[0])}</span>`;
++  $('stT').textContent=c.last_ok>1600000000?'ostatnie dane: '+new Date(c.last_ok*1000).toLocaleString('pl-PL')+(c.backfill_left?' · uzupełnianie historii: zostało '+c.backfill_left+' dni':''):'';
++  const e=$('err');if(c.enabled&&c.error){e.style.display='';e.textContent=c.error;}else e.style.display='none';
++  const T=c.today||{},Y=c.yesterday||{};
++  $('kv').innerHTML=[['Licznik',(c.serial||'–')+(c.tariff?' · taryfa '+c.tariff:'')],['Stan licznika – pobór (A+)',kwh3(c.total_plus)],['Stan licznika – oddanie (A−)',kwh3(c.total_minus)],
++    ['Dziś – pobrano / oddano',kwh3(T.imp)+' / '+kwh3(T.exp)],['Wczoraj – pobrano / oddano',kwh3(Y.imp)+' / '+kwh3(Y.exp)],['Zapytania',c.requests]]
++    .map(([a,b])=>`<div><span>${a}</span><b>${esc(b)}</b></div>`).join('');
++  if(!filled){$('en').checked=c.enabled;$('user').value=c.user||'';$('passH').textContent=c.has_password?'zapisane – zostaw puste, aby nie zmieniać':'wymagane';filled=true;}
++}
++async function load(){try{render(await get('/api/fusion/energa'));}catch(e){}}
++async function save(){
++  try{await post('/api/fusion/energa',{enabled:$('en').checked,user:$('user').value.trim(),password:$('pass').value});$('pass').value='';filled=false;toast('Zapisano – logowanie w ciągu kilku sekund');setTimeout(load,4000);}catch(e){toast('Błąd: '+e.message,false);}
++}
++async function refresh(){try{await post('/api/fusion/energa/refresh');toast('Pobieranie…');setTimeout(load,8000);}catch(e){toast('Błąd: '+e.message,false);}}
++load();setInterval(load,15000);
++</script>
++</div></div>
++<script>(function(){const s=document.getElementById("side"),c=document.getElementById("scrim"),b=document.getElementById("burger");const set=o=>{s.classList.toggle("open",o);c.classList.toggle("on",o);b.setAttribute("aria-expanded",o)};b.onclick=()=>set(!s.classList.contains("open"));c.onclick=()=>set(false);document.addEventListener("keydown",e=>{if(e.key==="Escape")set(false)});const mark=()=>{const p=location.pathname.replace(/\/$/,"")||"/",h=location.hash;let best=null;s.querySelectorAll("a.it").forEach(a=>{a.classList.remove("act");const u=new URL(a.getAttribute("href"),location.href),ap=u.pathname.replace(/\/$/,"")||"/";if(ap===p&&(u.hash===h||(!u.hash&&!best)))best=a;});if(!best)s.querySelectorAll("a.it").forEach(a=>{const ap=new URL(a.getAttribute("href"),location.href).pathname;if(!best&&ap===location.pathname)best=a;});if(best){best.classList.add("act");best.setAttribute("aria-current","page")}};s.querySelectorAll("a.it").forEach(a=>a.addEventListener("click",()=>{set(false);setTimeout(mark,0)}));window.addEventListener("hashchange",mark);mark();fetch("/api/fusion/update",{cache:"no-store"}).then(r=>r.ok?r.json():null).then(u=>{if(!u)return;const a=s.querySelector("a.it[href='/fusion/update']");if(a&&u.available&&u.latest){const n=document.createElement("span");n.className="nb";n.textContent="v"+u.latest.version;a.appendChild(n);}const f=document.getElementById("sideVer");if(f)f.textContent=" · v"+u.version;}).catch(()=>{});})();</script>
++</body>
++</html>
++)HTMLPAGE";
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 180dae40..50940f4b 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -278,7 +278,7 @@ section.chart{overflow:visible}
+ </style>
+ </head>
+ <body>
+-<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Mój dom</h1><div class="t" id="now"></div></div>
++<div class="app"><aside class="side" id="side" aria-label="Menu"><div class="brand"><div class="mk"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></div><div><b>Fusion</b><small>Hoymiles + SolarEdge</small></div></div><div class="grp">Instalacja</div><a class="it" href="/history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg><span>Pulpit</span></a><a class="it" href="/history#wykres"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><span>Wykresy</span></a><a class="it" href="/history#dachy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12 12 4l10 8"/><path d="M5 10v10h14V10"/><path d="M8 14h8M8 17h8"/></svg><span>Dachy</span></a><a class="it" href="/history#mppt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 10h18M9 4v12M15 4v12M12 16v4M8 20h8"/></svg><span>Inwertery i panele</span></a><a class="it" href="/history#tabele"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>Historia</span></a><div class="grp">Urządzenie</div><a class="it" href="/sd"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v13a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M10 7v3M13 7v3M16 8v2"/></svg><span>Karta SD</span></a><a class="it" href="/fusion/settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span>Ustawienia</span></a><a class="it" href="/fusion/secloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura SolarEdge</span></a><a class="it" href="/fusion/energa"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h3M13 16l3-4"/></svg><span>Licznik Energa</span></a><a class="it" href="/fusion/tuya"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg><span>Chmura Tuya</span></a><a class="it" href="/fusion/update"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg><span>Aktualizacja z GitHuba</span></a><a class="it" href="/?opendtu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 7 0 0 1 14 0"/><path d="M8.5 11a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="11" r="1"/><path d="M12 12v9"/></svg><span>OpenDTU</span></a><div class="foot">OpenDTU Fusion v2<span id="sideVer"></span><br><span id="sideSt">dane lokalne, bez chmury</span><span class="cred">Przygotował Okty z materiałów dostępnych na GitHub</span></div></aside><div class="scrim" id="scrim"></div><div class="content"><div class="top"><button class="burger" id="burger" aria-label="Otwórz menu" aria-controls="side" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><h1>Mój dom</h1><div class="t" id="now"></div></div>
+ <main class="dash">
+   <div class="hero night" id="hero">
+     <svg class="scene" viewBox="0 0 800 260" preserveAspectRatio="xMinYMax slice" aria-hidden="true">
+@@ -344,7 +344,7 @@ section.chart{overflow:visible}
+ 
+   <section id="tabele"><h3>Historia <span class="mu">[kWh]</span></h3>
+     <div class="tabs sm2" id="ttabs"><button data-t="days" class="on">Dni</button><button data-t="months">Miesiące</button><button data-t="years">Lata</button></div>
+-    <div style="overflow-x:auto"><table><thead><tr><th id="tH">Dzień</th><th><span class="lg">Hoymiles</span><span class="sm">Hoy</span></th><th><span class="lg">SolarEdge</span><span class="sm">SE</span></th><th>Razem</th><th><span class="lg">Eksport</span><span class="sm">Eksp.</span></th><th><span class="lg">Import</span><span class="sm">Imp.</span></th></tr></thead><tbody id="tB"></tbody></table></div>
++    <div style="overflow-x:auto"><table><thead><tr><th id="tH">Dzień</th><th><span class="lg">Hoymiles</span><span class="sm">Hoy</span></th><th><span class="lg">SolarEdge</span><span class="sm">SE</span></th><th>Razem</th><th><span class="lg">Eksport</span><span class="sm">Eksp.</span></th><th><span class="lg">Import</span><span class="sm">Imp.</span></th><th><span class="lg">Zużycie domu</span><span class="sm">Zuż.</span></th></tr></thead><tbody id="tB"></tbody></table></div>
+   </section>
+   <footer id="foot"></footer>
+ </main>
+@@ -713,7 +713,7 @@ function fcSettings(h){
+ }
+ let tMode='days';
+ function tables(){
+-  if(!H)return;const row=(l,r,c='')=>`<tr class="${c}"><td>${l}</td><td>${num(r.h)}</td><td>${num(r.s)}</td><td>${num(sum(r))}</td><td>${num(r.e)}</td><td>${num(r.i)}</td></tr>`;
++  if(!H)return;const row=(l,r,c='')=>`<tr class="${c}"><td>${l}</td><td>${num(r.h)}</td><td>${num(r.s)}</td><td>${num(sum(r))}</td><td>${num(r.e)}</td><td>${num(r.i)}</td><td>${r.i!=null&&r.e!=null?num(sum(r)+(+r.i)-(+r.e)):'–'}</td></tr>`;
+   let html='';
+   if(tMode==='days'){$('tH').textContent='Dzień';html=row('dziś '+dd(D(H.today.k)),H.today,'cur')+(H.days||[]).slice().reverse().map(r=>row(dayLabel(r.k),r)).join('');}
+   else if(tMode==='months'){$('tH').textContent='Miesiąc';html=(H.months||[]).slice().reverse().map((r,i)=>row(monLabel(r.k),r,i?'':'cur')).join('');}
+diff --git a/include/WebApi_fusion.h b/include/WebApi_fusion.h
+index 3a705147..ec3e9915 100644
+--- a/include/WebApi_fusion.h
++++ b/include/WebApi_fusion.h
+@@ -24,5 +24,9 @@ private:
+     void onSeCloudRefresh(AsyncWebServerRequest* request);
+     void onSeCloudMap(AsyncWebServerRequest* request);
+     void onPrefsGet(AsyncWebServerRequest* request);
++    void onEnergaPage(AsyncWebServerRequest* request);
++    void onEnergaGet(AsyncWebServerRequest* request);
++    void onEnergaPost(AsyncWebServerRequest* request);
++    void onEnergaRefresh(AsyncWebServerRequest* request);
+     void onPrefsPost(AsyncWebServerRequest* request);
+ };
+diff --git a/src/EnergaMeter.cpp b/src/EnergaMeter.cpp
+new file mode 100644
+index 00000000..341b7562
+--- /dev/null
++++ b/src/EnergaMeter.cpp
+@@ -0,0 +1,465 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "EnergaMeter.h"
++#include "EnergyHistory.h"
++#include <LittleFS.h>
++#include <esp_http_client.h>
++#include <esp_log.h>
++#include <esp_system.h>
++#include <time.h>
++
++extern "C" esp_err_t esp_crt_bundle_attach(void* conf);
++
++#undef TAG
++static const char* TAG = "energa";
++
++EnergaMeterClass EnergaMeter;
++
++#define EN_CFG_FILE "/energa.json"
++static const char* BASE = "https://api-mojlicznik.energa-operator.pl/dp";
++static const char* UA = "Energa/3.1.2 (pl.energa-operator.mojlicznik; build:1; iOS 16.6.1) Alamofire/5.6.4";
++static const size_t MAX_BODY = 96 * 1024;
++
++static String urlEnc(const String& s)
++{
++    static const char* hex = "0123456789ABCDEF";
++    String o;
++    for (size_t k = 0; k < s.length(); k++) {
++        const uint8_t c = s[k];
++        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
++            o += (char)c;
++        } else {
++            o += '%';
++            o += hex[c >> 4];
++            o += hex[c & 15];
++        }
++    }
++    return o;
++}
++
++// ---------------------------------------------------------------- HTTP (GET, cookies kept)
++struct EnCtx {
++    String body;
++    bool truncated = false;
++    std::vector<std::pair<String, String>>* jar = nullptr;
++};
++
++static esp_err_t onEvent(esp_http_client_event_t* e)
++{
++    EnCtx* c = static_cast<EnCtx*>(e->user_data);
++    if (!c) return ESP_OK;
++    if (e->event_id == HTTP_EVENT_ON_HEADER && e->header_key && e->header_value && c->jar
++        && !strcasecmp(e->header_key, "Set-Cookie")) {
++        String v = e->header_value;
++        const int sc = v.indexOf(';');
++        if (sc >= 0) v = v.substring(0, sc);
++        const int eq = v.indexOf('=');
++        if (eq > 0) {
++            const String n = v.substring(0, eq), val = v.substring(eq + 1);
++            bool found = false;
++            for (auto& kv : *c->jar) {
++                if (kv.first == n) { kv.second = val; found = true; }
++            }
++            if (!found) c->jar->emplace_back(n, val);
++        }
++    } else if (e->event_id == HTTP_EVENT_ON_DATA && e->data_len > 0) {
++        if (c->body.length() + e->data_len <= MAX_BODY) c->body.concat(static_cast<const char*>(e->data), e->data_len);
++        else c->truncated = true;
++    }
++    return ESP_OK;
++}
++
++bool EnergaMeterClass::get(const String& path, String& out, int& status)
++{
++    String url = String(BASE) + path;
++    if (_token.length()) url += String(path.indexOf('?') >= 0 ? "&" : "?") + "token=" + urlEnc(_token);
++    EnCtx ctx;
++    ctx.jar = &_cookies;
++    esp_http_client_config_t cfg = {};
++    cfg.url = url.c_str();
++    cfg.method = HTTP_METHOD_GET;
++    cfg.crt_bundle_attach = esp_crt_bundle_attach;
++    cfg.timeout_ms = 20000;
++    cfg.buffer_size = 4096;
++    cfg.buffer_size_tx = 2048;
++    cfg.user_agent = UA;
++    cfg.event_handler = onEvent;
++    cfg.user_data = &ctx;
++    esp_http_client_handle_t c = esp_http_client_init(&cfg);
++    if (!c) {
++        status = -1;
++        return false;
++    }
++    esp_http_client_set_header(c, "Accept", "application/json");
++    esp_http_client_set_header(c, "Accept-Language", "pl-PL;q=1.0");
++    esp_http_client_set_header(c, "Accept-Encoding", "identity");
++    String ck;
++    for (auto& kv : _cookies) {
++        if (ck.length()) ck += "; ";
++        ck += kv.first + "=" + kv.second;
++    }
++    if (ck.length()) esp_http_client_set_header(c, "Cookie", ck.c_str());
++    const esp_err_t err = esp_http_client_perform(c);
++    status = err == ESP_OK ? esp_http_client_get_status_code(c) : -2;
++    esp_http_client_cleanup(c);
++    _requests++;
++    if (status != 200 || ctx.truncated) return false;
++    out = std::move(ctx.body);
++    return true;
++}
++
++// ---------------------------------------------------------------- config
++void EnergaMeterClass::load()
++{
++    File f = LittleFS.open(EN_CFG_FILE, "r");
++    if (f) {
++        JsonDocument d;
++        if (!deserializeJson(d, f)) {
++            _cfg.enabled = d["enabled"] | false;
++            _cfg.user = d["user"] | "";
++            _cfg.password = d["pass"] | "";
++            _deviceToken = d["dev"] | "";
++        }
++        f.close();
++    }
++    if (_deviceToken.length() != 64) { // like the app: one random token per installation
++        uint8_t r[32];
++        esp_fill_random(r, sizeof(r));
++        _deviceToken = "";
++        for (uint8_t b : r) {
++            char h[3];
++            snprintf(h, sizeof(h), "%02x", b);
++            _deviceToken += h;
++        }
++        save();
++    }
++}
++
++bool EnergaMeterClass::save()
++{
++    JsonDocument d;
++    d["enabled"] = _cfg.enabled;
++    d["user"] = _cfg.user;
++    d["pass"] = _cfg.password;
++    d["dev"] = _deviceToken;
++    File f = LittleFS.open(EN_CFG_FILE, "w");
++    if (!f) return false;
++    const bool ok = serializeJson(d, f) > 0;
++    f.close();
++    return ok;
++}
++
++EnergaConfig EnergaMeterClass::getConfig()
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    return _cfg;
++}
++
++bool EnergaMeterClass::setConfig(const EnergaConfig& c, bool keepPassword)
++{
++    bool ok;
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        const String oldPass = _cfg.password;
++        const bool userChanged = c.user != _cfg.user;
++        _cfg = c;
++        _cfg.user.trim();
++        if (keepPassword) _cfg.password = oldPass;
++        if (userChanged || !keepPassword) {
++            _loggedIn = false;
++            _meterId = "";
++            _backfillLeft = -1;
++        }
++        ok = save();
++        _state = _cfg.enabled ? "oczekuje" : "wyłączone";
++        _error = "";
++    }
++    _cfgChanged = true;
++    _refresh = true;
++    return ok;
++}
++
++void EnergaMeterClass::setError(const String& e)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    _error = e;
++    _state = "błąd";
++    ESP_LOGW(TAG, "%s", e.c_str());
++}
++
++// ---------------------------------------------------------------- API
++bool EnergaMeterClass::login()
++{
++    const EnergaConfig c = getConfig();
++    if (c.user.isEmpty() || c.password.isEmpty()) {
++        setError("Brak e-maila lub hasła do Mój Licznik");
++        return false;
++    }
++    _cookies.clear();
++    _token = "";
++    String out;
++    int st;
++    get("/apihelper/SessionStatus", out, st);
++    const String q = "/apihelper/UserLogin?clientOS=ios&notifyService=APNs&username=" + urlEnc(c.user) + "&password=" + urlEnc(c.password)
++        + "&token=" + _deviceToken;
++    if (!get(q, out, st)) {
++        setError(String("Logowanie do Mój Licznik: HTTP ") + st);
++        return false;
++    }
++    JsonDocument d;
++    if (deserializeJson(d, out) || !(d["success"] | false)) {
++        const String msg = d["error"] | (d["message"] | "");
++        setError("Logowanie nieudane – sprawdź e-mail i hasło" + (msg.length() ? " (" + msg + ")" : String()));
++        return false;
++    }
++    _token = d["token"] | (d["response"]["token"] | "");
++    _loggedIn = true;
++    ESP_LOGI(TAG, "logged in");
++    return true;
++}
++
++bool EnergaMeterClass::fetchMeter()
++{
++    String out;
++    int st;
++    if (!get("/resources/user/data", out, st)) {
++        if (st == 401 || st == 403) _loggedIn = false;
++        setError(String("Dane licznika: HTTP ") + st);
++        return false;
++    }
++    JsonDocument filter;
++    JsonObject mp = filter["response"]["meterPoints"][0].to<JsonObject>();
++    mp["id"] = true;
++    mp["dev"] = true;
++    mp["tariff"] = true;
++    mp["lastMeasurements"][0]["zone"] = true;
++    mp["lastMeasurements"][0]["value"] = true;
++    mp["meterObjects"][0]["obis"] = true;
++    JsonDocument d;
++    if (deserializeJson(d, out, DeserializationOption::Filter(filter))) {
++        setError("Dane licznika: niepoprawna odpowiedź");
++        return false;
++    }
++    JsonObjectConst m = d["response"]["meterPoints"][0];
++    if (m.isNull()) {
++        setError("Na koncie nie ma licznika");
++        return false;
++    }
++    float plus = 0, minus = 0;
++    bool anyP = false, anyM = false;
++    for (JsonObjectConst x : m["lastMeasurements"].as<JsonArrayConst>()) {
++        const String z = x["zone"] | "";
++        const float v = x["value"].as<float>();
++        if (z.indexOf("A+") >= 0) { plus += v; anyP = true; }
++        if (z.indexOf("A-") >= 0) { minus += v; anyM = true; }
++    }
++    String op, om;
++    for (JsonObjectConst o : m["meterObjects"].as<JsonArrayConst>()) {
++        const String ob = o["obis"] | "";
++        if (ob.startsWith("1-0:1.8.0")) op = ob;
++        if (ob.startsWith("1-0:2.8.0")) om = ob;
++    }
++    std::lock_guard<std::mutex> lock(_mutex);
++    if (m["id"].is<const char*>()) {
++        _meterId = m["id"].as<String>();
++    } else {
++        char idb[24];
++        snprintf(idb, sizeof(idb), "%lld", (long long)m["id"].as<double>());
++        _meterId = idb;
++    }
++    _serial = m["dev"] | "";
++    _tariff = m["tariff"] | "";
++    _obisPlus = op.length() ? op : "1-0:1.8.0*255";
++    _obisMinus = om;
++    _totalPlus = anyP ? plus : NAN;
++    _totalMinus = anyM ? minus : NAN;
++    return true;
++}
++
++// one day (local midnight) -> hourly kWh for A+ and A-
++bool EnergaMeterClass::fetchDay(time_t dayStart, EnergaDay& day)
++{
++    struct tm t;
++    localtime_r(&dayStart, &t);
++    char ds[11];
++    strftime(ds, sizeof(ds), "%Y-%m-%d", &t);
++    day.date = ds;
++    for (int i = 0; i < 24; i++) day.hImp[i] = day.hExp[i] = NAN;
++    String id, op, om;
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        id = _meterId;
++        op = _obisPlus;
++        om = _obisMinus;
++    }
++    char ms[24];
++    snprintf(ms, sizeof(ms), "%lld", (long long)dayStart * 1000LL);
++    auto chart = [&](const String& obis, float* h, float& total) -> bool {
++        if (obis.isEmpty()) return true;
++        String out;
++        int st;
++        const String q = "/resources/mchart?meterPoint=" + urlEnc(id) + "&type=DAY&meterObject=" + urlEnc(obis) + "&mainChartDate=" + ms;
++        if (!get(q, out, st)) {
++            if (st == 401 || st == 403) _loggedIn = false;
++            return false;
++        }
++        JsonDocument filter;
++        filter["response"]["mainChart"][0]["tm"] = true;
++        filter["response"]["mainChart"][0]["zones"] = true;
++        JsonDocument d;
++        if (deserializeJson(d, out, DeserializationOption::Filter(filter))) return false;
++        bool any = false;
++        total = 0;
++        for (JsonObjectConst p : d["response"]["mainChart"].as<JsonArrayConst>()) {
++            const time_t tm = (time_t)(p["tm"].as<double>() / 1000.0);
++            struct tm lt;
++            localtime_r(&tm, &lt);
++            int hr = lt.tm_hour;
++            float v = 0;
++            bool has = false;
++            for (JsonVariantConst z : p["zones"].as<JsonArrayConst>()) {
++                if (!z.isNull()) { v += z.as<float>(); has = true; }
++            }
++            if (!has || v < 0 || v > 100) continue; // no value yet / implausible
++            if (hr >= 0 && hr < 24) h[hr] = (isnan(h[hr]) ? 0 : h[hr]) + v;
++            total += v;
++            any = true;
++        }
++        if (!any) total = -1;
++        return true;
++    };
++    if (!chart(op, day.hImp, day.imp)) return false;
++    if (!chart(om, day.hExp, day.exp)) return false;
++    return true;
++}
++
++static time_t midnight(int daysBack)
++{
++    time_t now = time(nullptr);
++    struct tm t;
++    localtime_r(&now, &t);
++    t.tm_mday -= daysBack;
++    t.tm_hour = 0;
++    t.tm_min = 0;
++    t.tm_sec = 0;
++    t.tm_isdst = -1;
++    return mktime(&t);
++}
++
++bool EnergaMeterClass::cycle()
++{
++    {
++        std::lock_guard<std::mutex> lock(_mutex);
++        _state = "pobieranie";
++    }
++    if (!_loggedIn && !login()) return false;
++    if (!fetchMeter()) {
++        if (!_loggedIn && login() && fetchMeter()) {
++        } else {
++            return false;
++        }
++    }
++    EnergaDay td, yd;
++    const bool ok1 = fetchDay(midnight(0), td);
++    const bool ok2 = fetchDay(midnight(1), yd);
++    if (!ok1 && !ok2) {
++        setError("Dane godzinowe: brak odpowiedzi");
++        return false;
++    }
++    if (ok2 && (yd.imp >= 0 || yd.exp >= 0)) EnergyHistory.setGridDay(yd.date.c_str(), yd.imp, yd.exp);
++    if (ok1) EnergyHistory.setGridToday(td.date.c_str(), td.imp, td.exp);
++    std::lock_guard<std::mutex> lock(_mutex);
++    if (ok1) _today = td;
++    if (ok2) _yesterday = yd;
++    if (_backfillLeft < 0) _backfillLeft = 60; // days 2..61 back
++    _lastOk = time(nullptr);
++    _state = "połączono";
++    _error = "";
++    return true;
++}
++
++// ---------------------------------------------------------------- task
++void EnergaMeterClass::init()
++{
++    load();
++    _state = _cfg.enabled ? "oczekuje" : "wyłączone";
++    if (xTaskCreatePinnedToCore(taskEntry, "energa", 10240, this, 1, nullptr, 0) != pdPASS) ESP_LOGE(TAG, "task not started");
++}
++
++void EnergaMeterClass::taskEntry(void* arg) { static_cast<EnergaMeterClass*>(arg)->taskLoop(); }
++
++void EnergaMeterClass::taskLoop()
++{
++    vTaskDelay(pdMS_TO_TICKS(90000));
++    uint32_t last = 0, backoff = 0;
++    bool first = true;
++    for (;;) {
++        const EnergaConfig c = getConfig();
++        if (_cfgChanged) {
++            _cfgChanged = false;
++            backoff = 0;
++        }
++        struct tm t;
++        const bool online = getLocalTime(&t, 5) && t.tm_year >= (2024 - 1900);
++        if (c.enabled && c.user.length() && online) {
++            if (first || _refresh || millis() - last >= 3600000UL + backoff) {
++                _refresh = false;
++                first = false;
++                last = millis();
++                backoff = cycle() ? 0 : min<uint32_t>(backoff ? backoff * 2 : 15 * 60000UL, 6 * 3600000UL);
++            } else if (_backfillLeft > 0 && _loggedIn) { // history of the last 62 days, one day every few seconds
++                const int back = 62 - _backfillLeft;
++                EnergaDay d;
++                if (fetchDay(midnight(back), d) && (d.imp >= 0 || d.exp >= 0)) EnergyHistory.setGridDay(d.date.c_str(), d.imp, d.exp);
++                _backfillLeft--;
++                vTaskDelay(pdMS_TO_TICKS(4000));
++                continue;
++            }
++        }
++        vTaskDelay(pdMS_TO_TICKS(2000));
++    }
++}
++
++// ---------------------------------------------------------------- output
++void EnergaMeterClass::toJson(JsonVariant root)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    root["enabled"] = _cfg.enabled;
++    root["user"] = _cfg.user;
++    root["has_password"] = _cfg.password.length() > 0;
++    root["state"] = _state;
++    root["error"] = _error;
++    root["requests"] = _requests;
++    root["last_ok"] = (uint32_t)_lastOk;
++    root["serial"] = _serial;
++    root["tariff"] = _tariff;
++    if (!isnan(_totalPlus)) root["total_plus"] = _totalPlus;
++    if (!isnan(_totalMinus)) root["total_minus"] = _totalMinus;
++    root["backfill_left"] = _backfillLeft < 0 ? 0 : _backfillLeft;
++    auto day = [&](const EnergaDay& d, const char* name) {
++        if (d.date.isEmpty()) return;
++        auto o = root[name].to<JsonObject>();
++        o["date"] = d.date;
++        if (d.imp >= 0) o["imp"] = d.imp;
++        if (d.exp >= 0) o["exp"] = d.exp;
++    };
++    day(_today, "today");
++    day(_yesterday, "yesterday");
++}
++
++void EnergaMeterClass::hourlyToJson(JsonObject root)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    root["enabled"] = _cfg.enabled;
++    auto day = [&](const EnergaDay& d, const char* name) {
++        if (d.date.isEmpty()) return;
++        auto o = root[name].to<JsonObject>();
++        o["date"] = d.date;
++        auto a = o["imp"].to<JsonArray>(), b = o["exp"].to<JsonArray>();
++        for (int i = 0; i < 24; i++) {
++            if (isnan(d.hImp[i])) a.add(nullptr); else a.add(serialized(String(d.hImp[i], 3)));
++            if (isnan(d.hExp[i])) b.add(nullptr); else b.add(serialized(String(d.hExp[i], 3)));
++        }
++    };
++    day(_today, "today");
++    day(_yesterday, "yesterday");
++}
+diff --git a/src/EnergyHistory.cpp b/src/EnergyHistory.cpp
+index 4166f488..17365ef1 100644
+--- a/src/EnergyHistory.cpp
++++ b/src/EnergyHistory.cpp
+@@ -7,6 +7,7 @@
+ #include <algorithm>
+ #include "SolarEdgeCloud.h"
+ #include "SdHistory.h"
++#include "EnergaMeter.h"
+ #include "Configuration.h"
+ #include "Datastore.h"
+ #include "HoymilesChannels.h"
+@@ -130,6 +131,10 @@ EnergyRecord EnergyHistoryClass::todayRecord() const
+     r.se = s < 0 ? 0 : s;
+     r.exp = delta(_last.exp, _start.exp);
+     r.imp = delta(_last.imp, _start.imp);
++    if (r.exp < 0 && r.imp < 0 && strcmp(_gridKey, _date) == 0) { // no local meter: values from the meter portal
++        r.exp = _gridExp;
++        r.imp = _gridImp;
++    }
+     r.hoyPeak = _hoyPeak;
+     r.sePeak = _sePeak;
+     return r;
+@@ -283,6 +288,39 @@ bool EnergyHistoryClass::load()
+     return true;
+ }
+ 
++void EnergyHistoryClass::setGridToday(const char* key, float imp, float exp)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    strlcpy(_gridKey, key, sizeof(_gridKey));
++    _gridImp = imp;
++    _gridExp = exp;
++}
++
++// a finished day: replace import/export and correct the month and year sums
++void EnergyHistoryClass::setGridDay(const char* key, float imp, float exp)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    for (auto& d : _days) {
++        if (strcmp(d.key, key) != 0) continue;
++        const float di = imp >= 0 ? imp - (d.imp < 0 ? 0 : d.imp) : 0;
++        const float de = exp >= 0 ? exp - (d.exp < 0 ? 0 : d.exp) : 0;
++        if (fabsf(di) < 0.0005f && fabsf(de) < 0.0005f && (imp < 0 || d.imp >= 0) && (exp < 0 || d.exp >= 0)) return;
++        if (imp >= 0) d.imp = imp;
++        if (exp >= 0) d.exp = exp;
++        auto fix = [&](std::deque<EnergyRecord>& list, size_t n) {
++            for (auto& r : list) {
++                if (strncmp(r.key, key, n) != 0 || strlen(r.key) != n) continue;
++                if (imp >= 0) r.imp = (r.imp < 0 ? 0 : r.imp) + di;
++                if (exp >= 0) r.exp = (r.exp < 0 ? 0 : r.exp) + de;
++            }
++        };
++        fix(_months, 7);
++        fix(_years, 4);
++        _dirty = true;
++        return;
++    }
++}
++
+ int EnergyHistoryClass::importDays(const std::vector<EnergyRecord>& days)
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+@@ -367,6 +405,7 @@ void EnergyHistoryClass::toJson(JsonVariant root)
+         root["loc_default"] = fabsf(ntp.Latitude - NTP_LATITUDE) < 0.001f && fabsf(ntp.Longitude - NTP_LONGITUDE) < 0.001f;
+     }
+     SdHistory.statusToJson(root["sd"].to<JsonObject>());
++    if (EnergaMeter.getConfig().enabled) EnergaMeter.hourlyToJson(root["energa"].to<JsonObject>());
+     {   // location for the outdoor weather on the dashboard (rounded to ~1 km)
+         const auto& ntp = Configuration.get().Ntp;
+         if (ntp.Latitude != 0 || ntp.Longitude != 0) {
+diff --git a/src/WebApi_fusion.cpp b/src/WebApi_fusion.cpp
+index 02a5f939..563cd310 100644
+--- a/src/WebApi_fusion.cpp
++++ b/src/WebApi_fusion.cpp
+@@ -13,6 +13,10 @@
+  *   GET  /api/fusion/secloud          config (never the password) + status + optimizer data (admin)
+  *   POST /api/fusion/secloud          data={"enabled":true,"site":"123","user":"a@b","password":"..","interval":15} (admin)
+  *   POST /api/fusion/secloud/refresh  fetch now (admin)
++ *   GET  /fusion/energa               Energa Mój Licznik page (admin)
++ *   GET  /api/fusion/energa           config (never the password) + status (admin)
++ *   POST /api/fusion/energa           data={"enabled":true,"user":"a@b","password":".."} (admin)
++ *   POST /api/fusion/energa/refresh   fetch now (admin)
+  *   GET  /api/fusion/prefs            dashboard settings (roof data for the production forecast)
+  *   POST /api/fusion/prefs            data={...} JSON object, max 2 kB (admin)
+  *   POST /api/fusion/secloud/map      data={"map":["<optimizer serial per roof slot>",..]} (admin)
+@@ -22,6 +26,7 @@
+ #include "FusionTuya.h"
+ #include "FusionUpdate.h"
+ #include "SolarEdgeCloud.h"
++#include "EnergaMeter.h"
+ #include <LittleFS.h>
+ #include "WebApi.h"
+ #include "WebApi_errors.h"
+@@ -44,6 +49,10 @@ void WebApiFusionClass::init(AsyncWebServer& server, Scheduler&)
+     server.on("/api/fusion/secloud/refresh", HTTP_POST, BIND(onSeCloudRefresh));
+     server.on("/api/fusion/secloud/map", HTTP_POST, BIND(onSeCloudMap));
+     server.on("/api/fusion/prefs", HTTP_GET, BIND(onPrefsGet));
++    server.on("/fusion/energa", HTTP_GET, BIND(onEnergaPage));
++    server.on("/api/fusion/energa/refresh", HTTP_POST, BIND(onEnergaRefresh));
++    server.on("/api/fusion/energa", HTTP_GET, BIND(onEnergaGet));
++    server.on("/api/fusion/energa", HTTP_POST, BIND(onEnergaPost));
+     server.on("/api/fusion/prefs", HTTP_POST, BIND(onPrefsPost));
+     server.on("/api/fusion/secloud", HTTP_GET, BIND(onSeCloudGet));
+     server.on("/api/fusion/secloud", HTTP_POST, BIND(onSeCloudPost));
+@@ -214,3 +223,39 @@ void WebApiFusionClass::onPrefsPost(AsyncWebServerRequest* request)
+     }
+     reply(request, response, ok, "Settings saved!", "Failed to save settings!");
+ }
++
++void WebApiFusionClass::onEnergaPage(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentials(request)) return;
++    request->send(200, "text/html; charset=utf-8", ENERGA_PAGE_HTML);
++}
++
++void WebApiFusionClass::onEnergaGet(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentials(request)) return;
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    EnergaMeter.toJson(response->getRoot());
++    WebApi.sendJsonResponse(request, response, __FUNCTION__, __LINE__);
++}
++
++void WebApiFusionClass::onEnergaPost(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentials(request)) return;
++    AsyncJsonResponse* response = new AsyncJsonResponse();
++    JsonDocument root;
++    if (!WebApi.parseRequestData(request, response, root)) return;
++    EnergaConfig c = EnergaMeter.getConfig();
++    c.enabled = root["enabled"] | c.enabled;
++    if (root["user"].is<const char*>()) c.user = root["user"].as<String>();
++    const String pass = root["password"] | "";
++    const bool keep = pass.isEmpty();
++    if (!keep) c.password = pass;
++    reply(request, response, EnergaMeter.setConfig(c, keep), "Settings saved!", "Failed to save settings!");
++}
++
++void WebApiFusionClass::onEnergaRefresh(AsyncWebServerRequest* request)
++{
++    if (!WebApi.checkCredentials(request)) return;
++    EnergaMeter.requestRefresh();
++    reply(request, new AsyncJsonResponse(), true, "Queued", "");
++}
+diff --git a/src/main.cpp b/src/main.cpp
+index 7224867e..fb6149ed 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -30,6 +30,7 @@
+ #include "SdHistory.h"
+ #include "SolarEdge.h"
+ #include "SolarEdgeCloud.h"
++#include "EnergaMeter.h"
+ #include "Scheduler.h"
+ #include "SunPosition.h"
+ #include "Utils.h"
+@@ -156,6 +157,7 @@ void setup()
+     FusionUpdate.init(scheduler);
+     FusionTuya.init(scheduler);
+     SolarEdgeCloud.init();
++    EnergaMeter.init();
+ 
+     ESP_LOGI(TAG, "Startup complete");
+ }
+-- 
+2.43.0
+
