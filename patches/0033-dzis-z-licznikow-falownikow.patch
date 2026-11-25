@@ -1,0 +1,160 @@
+From 88a4dbd67e1764dac2d950d1cce6cbf9e4a55ddb Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 20:57:23 +0100
+Subject: [PATCH] History: today never below the devices' own day values
+ (Hoymiles YieldDay, SolarEdge cloud 'today'), kept across restarts
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ6h3vz5euN6BMPrNFK
+---
+ include/EnergyHistory.h  |  4 ++++
+ include/SolarEdgeCloud.h |  3 +++
+ src/EnergyHistory.cpp    | 26 ++++++++++++++++++++++++--
+ src/SolarEdgeCloud.cpp   |  9 +++++++++
+ 4 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/include/EnergyHistory.h b/include/EnergyHistory.h
+index 83a4616..29e2efe 100644
+--- a/include/EnergyHistory.h
++++ b/include/EnergyHistory.h
+@@ -99,6 +99,10 @@ private:
+     Counters _start; // counters at beginning of the day
+     Counters _last;  // last valid counters seen
+     float _hoyPeak = 0, _sePeak = 0;
++    // fallbacks when the lifetime counters miss part of the day (restarts,
++    // SolarEdge only from the cloud, counter source switched): kWh, max seen today
++    float _hoyDay = 0; // Hoymiles YieldDay reported by the inverters
++    float _seDay = 0;  // SolarEdge production today from the cloud portal
+     char _firstProd[6] = { 0 }, _lastProd[6] = { 0 };
+ 
+     std::deque<EnergyRecord> _days, _months, _years;
+diff --git a/include/SolarEdgeCloud.h b/include/SolarEdgeCloud.h
+index ec32dff..40793ff 100644
+--- a/include/SolarEdgeCloud.h
++++ b/include/SolarEdgeCloud.h
+@@ -50,6 +50,7 @@ struct SeCloudData {
+     float peakKw = NAN;
+     float powerW = NAN;     // sum of optimizer power (last portal values)
+     float todayWh = NAN, monthWh = NAN, yearWh = NAN, totalWh = NAN;
++    String todayDate; // local date (YYYY-MM-DD) todayWh belongs to
+     std::vector<SeCloudOptimizer> optimizers;
+ };
+ 
+@@ -67,6 +68,8 @@ public:
+ 
+     // fills SolarEdge data from the cloud if it is fresh enough; false if not
+     bool fill(SolarEdgeData& d);
++    // production today according to the portal (Wh), only for the given local date
++    bool todayWh(const char* date, float& wh);
+ 
+ private:
+     static void taskEntry(void* arg);
+diff --git a/src/EnergyHistory.cpp b/src/EnergyHistory.cpp
+index 17365ef..bebe9bd 100644
+--- a/src/EnergyHistory.cpp
++++ b/src/EnergyHistory.cpp
+@@ -79,6 +79,14 @@ void EnergyHistoryClass::loop()
+     float hoyW, seW;
+     readLiveCounters(now, hoyW, seW);
+ 
++    // day values reported by the devices themselves (read before taking the lock)
++    float hoyDay = -1, seDay = -1;
++    if (Datastore.getIsAllEnabledReachable() && Datastore.getIsAtLeastOneProducing()) {
++        hoyDay = Datastore.getTotalAcYieldDayEnabled() / 1000.0f; // Wh -> kWh
++    }
++    float cloudWh;
++    if (SolarEdgeCloud.todayWh(today, cloudWh) && cloudWh >= 0) seDay = cloudWh / 1000.0f;
++
+     std::lock_guard<std::mutex> lock(_mutex);
+ 
+     if (_date[0] == 0) {
+@@ -104,6 +112,14 @@ void EnergyHistoryClass::loop()
+     upd(_last.se, _start.se, now.se);
+     upd(_last.exp, _start.exp, now.exp);
+     upd(_last.imp, _start.imp, now.imp);
++    if (hoyDay > _hoyDay) {
++        _hoyDay = hoyDay;
++        _dirty = true;
++    }
++    if (seDay > _seDay) {
++        _seDay = seDay;
++        _dirty = true;
++    }
+ 
+     if (hoyW > _hoyPeak) _hoyPeak = hoyW;
+     if (seW > _sePeak) _sePeak = seW;
+@@ -127,8 +143,8 @@ EnergyRecord EnergyHistoryClass::todayRecord() const
+     strlcpy(r.key, _date, sizeof(r.key));
+     const float h = delta(_last.hoy, _start.hoy);
+     const float s = delta(_last.se, _start.se);
+-    r.hoy = h < 0 ? 0 : h;
+-    r.se = s < 0 ? 0 : s;
++    r.hoy = std::max(h < 0 ? 0.0f : h, _hoyDay);
++    r.se = std::max(s < 0 ? 0.0f : s, _seDay);
+     r.exp = delta(_last.exp, _start.exp);
+     r.imp = delta(_last.imp, _start.imp);
+     if (r.exp < 0 && r.imp < 0 && strcmp(_gridKey, _date) == 0) { // no local meter: values from the meter portal
+@@ -179,6 +195,7 @@ void EnergyHistoryClass::rollover(const char* newDate)
+     strlcpy(_date, newDate, sizeof(_date));
+     _start = _last;
+     _hoyPeak = _sePeak = 0;
++    _hoyDay = _seDay = 0;
+     _firstProd[0] = _lastProd[0] = 0;
+ 
+     save();
+@@ -227,6 +244,8 @@ bool EnergyHistoryClass::save()
+     putC(cur["last"].to<JsonObject>(), _last);
+     cur["hp"] = (int)_hoyPeak;
+     cur["sp"] = (int)_sePeak;
++    cur["hd"] = serialized(String(_hoyDay, 3));
++    cur["sd"] = serialized(String(_seDay, 3));
+     cur["fp"] = _firstProd;
+     cur["lp"] = _lastProd;
+ 
+@@ -280,6 +299,8 @@ bool EnergyHistoryClass::load()
+     getC(cur["last"], _last);
+     _hoyPeak = cur["hp"] | 0.0f;
+     _sePeak = cur["sp"] | 0.0f;
++    _hoyDay = cur["hd"] | 0.0f;
++    _seDay = cur["sd"] | 0.0f;
+     strlcpy(_firstProd, cur["fp"] | "", sizeof(_firstProd));
+     strlcpy(_lastProd, cur["lp"] | "", sizeof(_lastProd));
+     for (JsonObjectConst o : doc["days"].as<JsonArrayConst>()) _days.push_back(recFromJson(o));
+@@ -352,6 +373,7 @@ void EnergyHistoryClass::reset()
+     _years.clear();
+     _start = _last;
+     _hoyPeak = _sePeak = 0;
++    _hoyDay = _seDay = 0;
+     _firstProd[0] = _lastProd[0] = 0;
+     save();
+ }
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index 3d3a718..449b145 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -1064,6 +1064,7 @@ bool SolarEdgeCloudClass::fetchProduction()
+     }
+     std::lock_guard<std::mutex> lock(_mutex);
+     _data.todayWh = d;
++    _data.todayDate = today;
+     _data.monthWh = m;
+     _data.yearWh = y;
+     if (!isnan(tot)) _data.totalWh = tot;
+@@ -1181,6 +1182,14 @@ bool SolarEdgeCloudClass::fill(SolarEdgeData& d)
+     return true;
+ }
+ 
++bool SolarEdgeCloudClass::todayWh(const char* date, float& wh)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    if (!_cfg.enabled || !_data.valid || isnan(_data.todayWh) || _data.todayDate != date) return false;
++    wh = _data.todayWh;
++    return true;
++}
++
+ void SolarEdgeCloudClass::toJson(JsonVariant root)
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+-- 
+2.43.0
+
