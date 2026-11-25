@@ -1,0 +1,273 @@
+From b43cbf74d5e98e44fa9a37d77bde603a655ae85a Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 18:13:33 +0100
+Subject: [PATCH] SolarEdge cloud: own HTTP/1.1 requests over esp-tls
+
+The IDF 4.4 HTTP client adds 'Content-Length: 0' to GET requests and stops
+at every non-2xx answer; the sign-in load balancer (awselb/2.0) answers the
+sign-in page request with 400 Bad Request. The request is now built by hand
+like a browser's, and status, headers and body are read in full.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ src/SolarEdgeCloud.cpp | 219 ++++++++++++++++++++++++++++++-----------
+ 1 file changed, 160 insertions(+), 59 deletions(-)
+
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index c887a46a..4bf71cfb 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -6,6 +6,7 @@
+ #include <esp_attr.h>
+ #include <esp_heap_caps.h>
+ #include <esp_http_client.h>
++#include <esp_tls.h>
+ #include <esp_log.h>
+ #include <esp_system.h>
+ #include <map>
+@@ -197,32 +198,6 @@ struct HttpCtx {
+     std::map<String, String>* jar = nullptr;
+ };
+ 
+-static esp_err_t onHttpEvent(esp_http_client_event_t* e)
+-{
+-    HttpCtx* c = static_cast<HttpCtx*>(e->user_data);
+-    if (!c) return ESP_OK;
+-    if (e->event_id == HTTP_EVENT_ON_HEADER && e->header_key && e->header_value) {
+-        if (!strcasecmp(e->header_key, "Server")) {
+-            c->server = e->header_value;
+-        } else if (!strcasecmp(e->header_key, "Location")) {
+-            c->location = e->header_value;
+-        } else if (!strcasecmp(e->header_key, "Set-Cookie") && c->jar) {
+-            String v = e->header_value;
+-            const int sc = v.indexOf(';');
+-            if (sc >= 0) v = v.substring(0, sc);
+-            const int eq = v.indexOf('=');
+-            if (eq > 0) (*c->jar)[v.substring(0, eq)] = v.substring(eq + 1);
+-        }
+-    } else if (e->event_id == HTTP_EVENT_ON_DATA && e->data_len > 0) {
+-        if (c->body.length() + e->data_len <= MAX_BODY) {
+-            c->body.concat(static_cast<const char*>(e->data), e->data_len);
+-        } else {
+-            c->truncated = true;
+-        }
+-    }
+-    return ESP_OK;
+-}
+-
+ static String cookieHeader(const std::map<String, String>& jar)
+ {
+     String s;
+@@ -267,49 +242,175 @@ static String netErrText()
+     return g_netErr + ", wolna pamięć " + String((unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024)) + " kB";
+ }
+ 
+-// one request, no automatic redirects; returns HTTP status or < 0
++// Header of an answer: Server, Location, Set-Cookie are kept
++static void takeHeader(HttpCtx& ctx, const String& line)
++{
++    const int c = line.indexOf(':');
++    if (c <= 0) return;
++    String k = line.substring(0, c);
++    k.trim();
++    String v = line.substring(c + 1);
++    v.trim();
++    if (k.equalsIgnoreCase("Server")) {
++        ctx.server = v;
++    } else if (k.equalsIgnoreCase("Location")) {
++        ctx.location = v;
++    } else if (k.equalsIgnoreCase("Set-Cookie") && ctx.jar) {
++        const int sc = v.indexOf(';');
++        if (sc >= 0) v = v.substring(0, sc);
++        const int eq = v.indexOf('=');
++        if (eq > 0) (*ctx.jar)[v.substring(0, eq)] = v.substring(eq + 1);
++    }
++}
++
++// one request, no automatic redirects; returns HTTP status or < 0.
++// Plain HTTP/1.1 over esp-tls (certificate bundle) instead of esp_http_client:
++// the IDF 4.4 client adds "Content-Length: 0" to every GET and treats every
++// non-2xx answer as an error, and the SolarEdge sign-in load balancer answers
++// such requests with "400 Bad Request". Here the request is exactly what a
++// browser sends, and the whole answer (status, headers, body) is read.
+ static int httpDo(esp_http_client_method_t method, const String& url, const String& body, const char* ctype,
+     const std::vector<std::pair<const char*, String>>& headers, HttpCtx& ctx)
+ {
+-    esp_http_client_config_t cfg = {};
+-    cfg.url = url.c_str();
+-    cfg.method = method;
+-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+-    cfg.timeout_ms = 20000;
+-    cfg.buffer_size = 4096;
+-    cfg.buffer_size_tx = 4096; // long OAuth URLs, bearer token
+-    cfg.disable_auto_redirect = true;
+-    cfg.user_agent = UA;
+-    cfg.event_handler = onHttpEvent;
+-    cfg.user_data = &ctx;
+-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+-    if (!c) return -1;
+-    esp_http_client_set_header(c, "Accept-Encoding", "identity");
+-    for (auto& h : headers) esp_http_client_set_header(c, h.first, h.second.c_str());
+-    if (ctx.jar && !ctx.jar->empty()) esp_http_client_set_header(c, "Cookie", cookieHeader(*ctx.jar).c_str());
+-    if (method == HTTP_METHOD_POST) {
+-        if (ctype) esp_http_client_set_header(c, "Content-Type", ctype);
+-        esp_http_client_set_post_field(c, body.c_str(), body.length());
+-    }
+     ctx.location = "";
+     ctx.server = "";
+     ctx.body = "";
+     ctx.truncated = false;
+-    esp_err_t err = esp_http_client_perform(c);
+-    // IDF 4.4: with disable_auto_redirect every answer that is not 2xx (redirect,
+-    // but also 4xx/5xx) ends perform() with ESP_ERR_HTTP_MAX_REDIRECT before the
+-    // body is read. The status and headers (Location, cookies) are there.
+-    if (err == ESP_ERR_HTTP_MAX_REDIRECT) {
+-        const int sc = esp_http_client_get_status_code(c);
+-        if (sc >= 100) err = ESP_OK; // body of an error answer is not read (only the status is used)
++    if (!url.startsWith("https://")) {
++        g_netErr = "adres nie jest https";
++        return -1;
++    }
++    const int hs = 8;
++    int pe = url.indexOf('/', hs);
++    const String host = pe < 0 ? url.substring(hs) : url.substring(hs, pe);
++    const String path = pe < 0 ? String("/") : url.substring(pe);
++    const bool post = method == HTTP_METHOD_POST;
++
++    String req;
++    req.reserve(512 + path.length() + body.length());
++    req += post ? "POST " : "GET ";
++    req += path;
++    req += " HTTP/1.1\r\nHost: ";
++    req += host;
++    req += "\r\nUser-Agent: ";
++    req += UA;
++    req += "\r\nAccept-Encoding: identity\r\nConnection: close\r\n";
++    for (auto& h : headers) {
++        req += h.first;
++        req += ": ";
++        req += h.second;
++        req += "\r\n";
++    }
++    if (ctx.jar && !ctx.jar->empty()) {
++        req += "Cookie: ";
++        req += cookieHeader(*ctx.jar);
++        req += "\r\n";
++    }
++    if (post) {
++        if (ctype) {
++            req += "Content-Type: ";
++            req += ctype;
++            req += "\r\n";
++        }
++        req += "Content-Length: ";
++        req += String((unsigned)body.length());
++        req += "\r\n";
++    }
++    req += "\r\n";
++    if (post) req += body;
++
++    esp_tls_cfg_t cfg = {};
++    cfg.crt_bundle_attach = esp_crt_bundle_attach;
++    cfg.timeout_ms = 20000;
++    esp_tls_t* tls = esp_tls_init();
++    if (!tls) {
++        g_netErr = "brak pamięci na TLS";
++        return -1;
+     }
+-    const int status = err == ESP_OK ? esp_http_client_get_status_code(c) : -2;
+-    if (err != ESP_OK) {
++    if (esp_tls_conn_new_sync(host.c_str(), host.length(), 443, &cfg, tls) != 1) {
+         const int en = errno;
+-        g_netErr = String(esp_err_to_name(err)) + " (errno " + String(en) + ")";
+-        ESP_LOGW(TAG, "%s: %s", url.substring(0, 60).c_str(), g_netErr.c_str());
++        g_netErr = String("połączenie TLS z ") + host + " nieudane (errno " + String(en) + ")";
++        ESP_LOGW(TAG, "%s", g_netErr.c_str());
++        esp_tls_conn_destroy(tls);
++        return -2;
++    }
++    size_t sent = 0;
++    int spins = 0;
++    while (sent < req.length()) {
++        const int w = esp_tls_conn_write(tls, req.c_str() + sent, req.length() - sent);
++        if (w > 0) {
++            sent += w;
++        } else if ((w != ESP_TLS_ERR_SSL_WANT_READ && w != ESP_TLS_ERR_SSL_WANT_WRITE) || ++spins > 500) {
++            g_netErr = String("wysyłanie nieudane (") + w + ")";
++            esp_tls_conn_destroy(tls);
++            return -2;
++        }
++    }
++
++    // read the whole answer (Connection: close)
++    String raw;
++    raw.reserve(8192);
++    char buf[1024];
++    bool tooBig = false;
++    spins = 0;
++    for (;;) {
++        const int r = esp_tls_conn_read(tls, buf, sizeof(buf));
++        if (r > 0) {
++            if (raw.length() + r <= MAX_BODY + 16384) {
++                raw.concat(buf, r);
++            } else {
++                tooBig = true;
++                break;
++            }
++        } else if ((r == ESP_TLS_ERR_SSL_WANT_READ || r == ESP_TLS_ERR_SSL_WANT_WRITE) && ++spins < 500) {
++            vTaskDelay(pdMS_TO_TICKS(10));
++            continue;
++        } else {
++            break; // 0 = closed, < 0 = error/timeout: use what has arrived
++        }
++    }
++    esp_tls_conn_destroy(tls);
++
++    const int he = raw.indexOf("\r\n\r\n");
++    if (!raw.startsWith("HTTP/") || he < 0) {
++        if (raw.length()) {
++            g_netErr = String("niepełna odpowiedź (") + raw.length() + " B)";
++        } else {
++            g_netErr = "brak odpowiedzi (przekroczony czas)";
++        }
++        return -2;
++    }
++    const int sp = raw.indexOf(' ');
++    const int status = raw.substring(sp + 1, sp + 4).toInt();
++    bool chunked = false;
++    int ls = raw.indexOf("\r\n") + 2;
++    while (ls < he) {
++        int le = raw.indexOf("\r\n", ls);
++        if (le < 0 || le > he) le = he;
++        const String line = raw.substring(ls, le);
++        String low = line;
++        low.toLowerCase();
++        if (low.startsWith("transfer-encoding:") && low.indexOf("chunked") >= 0) chunked = true;
++        takeHeader(ctx, line);
++        ls = le + 2;
++    }
++    const int bs = he + 4;
++    if (!chunked) {
++        ctx.body = raw.substring(bs);
++    } else {
++        int p = bs;
++        while (p < (int)raw.length()) {
++            const int le = raw.indexOf("\r\n", p);
++            if (le < 0) break;
++            const long n = strtol(raw.substring(p, le).c_str(), nullptr, 16);
++            if (n <= 0) break;
++            const int ds = le + 2;
++            const int de = min<int>(ds + n, raw.length());
++            ctx.body.concat(raw.c_str() + ds, de - ds);
++            p = de + 2;
++        }
+     }
+-    esp_http_client_cleanup(c);
++    if (ctx.body.length() > MAX_BODY || tooBig) ctx.truncated = true;
+     return status;
+ }
+ 
+-- 
+2.43.0
+
