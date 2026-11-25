@@ -1,0 +1,132 @@
+From 3c394dd10cf797615fdf1e77ac5157b364169578 Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 17:56:55 +0100
+Subject: [PATCH] SolarEdge cloud: browser-like page requests, escape redirect
+ targets, say which address answered 400 and who (Server header)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ src/SolarEdgeCloud.cpp | 59 ++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 51 insertions(+), 8 deletions(-)
+
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index 48a4f505..c887a46a 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -139,11 +139,46 @@ static String queryParam(const String& url, const char* name)
+     return v;
+ }
+ 
++// characters a browser would escape before sending a redirect target
++static String safeUrl(const String& u)
++{
++    static const char* hex = "0123456789ABCDEF";
++    String o;
++    o.reserve(u.length() + 16);
++    for (size_t k = 0; k < u.length(); k++) {
++        const uint8_t c = u[k];
++        if (c <= ' ' || c >= 0x7F || c == '"' || c == '<' || c == '>' || c == '\\' || c == '^' || c == '`' || c == '{' || c == '|' || c == '}') {
++            o += '%';
++            o += hex[c >> 4];
++            o += hex[c & 15];
++        } else {
++            o += (char)c;
++        }
++    }
++    return o;
++}
++
+ static String absUrl(const String& loc, const char* base)
+ {
+-    if (loc.startsWith("http")) return loc;
+-    if (loc.startsWith("/")) return String(base) + loc;
+-    return String(base) + "/" + loc;
++    String l = loc;
++    l.trim();
++    l.replace("&amp;", "&");
++    if (l.startsWith("http")) return safeUrl(l);
++    if (l.startsWith("/")) return safeUrl(String(base) + l);
++    return safeUrl(String(base) + "/" + l);
++}
++
++static String urlPath(const String& u)
++{
++    String p = u;
++    const int q = p.indexOf('?');
++    if (q >= 0) p = p.substring(0, q);
++    const int s = p.indexOf("://");
++    if (s >= 0) {
++        const int sl = p.indexOf('/', s + 3);
++        p = sl >= 0 ? p.substring(s + 3) : p.substring(s + 3) + "/";
++    }
++    return p;
+ }
+ 
+ static String isoDate(const struct tm& t)
+@@ -155,6 +190,7 @@ static String isoDate(const struct tm& t)
+ 
+ // ---------------------------------------------------------------- HTTP
+ struct HttpCtx {
++    String server; // "Server" answer header (who answered: CloudFront, Cognito ...)
+     String location;
+     String body;
+     bool truncated = false;
+@@ -166,7 +202,9 @@ static esp_err_t onHttpEvent(esp_http_client_event_t* e)
+     HttpCtx* c = static_cast<HttpCtx*>(e->user_data);
+     if (!c) return ESP_OK;
+     if (e->event_id == HTTP_EVENT_ON_HEADER && e->header_key && e->header_value) {
+-        if (!strcasecmp(e->header_key, "Location")) {
++        if (!strcasecmp(e->header_key, "Server")) {
++            c->server = e->header_value;
++        } else if (!strcasecmp(e->header_key, "Location")) {
+             c->location = e->header_value;
+         } else if (!strcasecmp(e->header_key, "Set-Cookie") && c->jar) {
+             String v = e->header_value;
+@@ -254,6 +292,7 @@ static int httpDo(esp_http_client_method_t method, const String& url, const Stri
+         esp_http_client_set_post_field(c, body.c_str(), body.length());
+     }
+     ctx.location = "";
++    ctx.server = "";
+     ctx.body = "";
+     ctx.truncated = false;
+     esp_err_t err = esp_http_client_perform(c);
+@@ -493,11 +532,13 @@ bool SolarEdgeCloudClass::login()
+     String url = loginUrl;
+     int st = 0;
+     step(1);
++    int hops = 0;
+     for (int hop = 0; hop < 5; hop++) {
+-        st = httpDo(HTTP_METHOD_GET, url, "", nullptr, { { "Accept", "text/html" } }, ctx);
++        hops = hop;
++        st = httpDo(HTTP_METHOD_GET, url, "", nullptr, { { "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }, { "Accept-Language", "en-US,en;q=0.9" } }, ctx);
+         if (st < 0) { // one more try: a busy moment (other cloud task in TLS) or a dropped connection
+             vTaskDelay(pdMS_TO_TICKS(3000));
+-            st = httpDo(HTTP_METHOD_GET, url, "", nullptr, { { "Accept", "text/html" } }, ctx);
++            st = httpDo(HTTP_METHOD_GET, url, "", nullptr, { { "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }, { "Accept-Language", "en-US,en;q=0.9" } }, ctx);
+         }
+         if (st >= 300 && st < 400 && ctx.location.length()) {
+             url = absUrl(ctx.location, LOGIN_BASE);
+@@ -507,7 +548,9 @@ bool SolarEdgeCloudClass::login()
+     }
+     if (st != 200) {
+         setError(st < 0 ? String("Logowanie: brak połączenia z login.solaredge.com – ") + netErrText()
+-                        : String("Logowanie: portal odrzucił zapytanie (HTTP ") + st + ")" + bodyHint(ctx.body));
++                        : String("Logowanie: portal odrzucił zapytanie (HTTP ") + st + ", " + urlPath(url)
++                            + (hops ? String(", po ") + hops + " przekier." : String()) + (ctx.server.length() ? String(", ") + ctx.server : String())
++                            + ")" + bodyHint(ctx.body));
+         return false;
+     }
+     auto inputs = formInputs(ctx.body);
+@@ -544,7 +587,7 @@ bool SolarEdgeCloudClass::login()
+             if (!next.startsWith(LOGIN_BASE)) break;
+             lastUrl = next;
+             step(3);
+-            st = httpDo(HTTP_METHOD_GET, next, "", nullptr, { { "Accept", "text/html" } }, ctx);
++            st = httpDo(HTTP_METHOD_GET, next, "", nullptr, { { "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }, { "Accept-Language", "en-US,en;q=0.9" } }, ctx);
+             continue;
+         }
+         break;
+-- 
+2.43.0
+
