@@ -1,0 +1,38 @@
+From 091b0d48fb3779d19cc78d2f53678089bea9abc3 Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 15:15:47 +0100
+Subject: [PATCH] SolarEdge cloud: accept redirect answers (IDF 4.4 reports
+ them as ESP_ERR_HTTP_MAX_REDIRECT)
+
+The sign-in page and the login form answer with redirects; perform() returned
+an error for them, so the login never got past the first request.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ src/SolarEdgeCloud.cpp | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index aaf598b3..73f02028 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -229,7 +229,14 @@ static int httpDo(esp_http_client_method_t method, const String& url, const Stri
+     ctx.location = "";
+     ctx.body = "";
+     ctx.truncated = false;
+-    const esp_err_t err = esp_http_client_perform(c);
++    esp_err_t err = esp_http_client_perform(c);
++    // IDF 4.4: with disable_auto_redirect a 3xx answer ends perform() with
++    // ESP_ERR_HTTP_MAX_REDIRECT, although the response (status, Location,
++    // cookies) is complete - the redirect is followed by the caller
++    if (err == ESP_ERR_HTTP_MAX_REDIRECT) {
++        const int sc = esp_http_client_get_status_code(c);
++        if (sc >= 300 && sc < 400) err = ESP_OK;
++    }
+     const int status = err == ESP_OK ? esp_http_client_get_status_code(c) : -2;
+     if (err != ESP_OK) {
+         const int en = errno;
+-- 
+2.43.0
+
