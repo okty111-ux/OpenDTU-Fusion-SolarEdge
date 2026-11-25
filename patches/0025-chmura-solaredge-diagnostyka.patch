@@ -1,0 +1,97 @@
+From 4b0dd45b2894e21013b5d39b2454a22136abcd35 Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 14:57:31 +0100
+Subject: [PATCH] SolarEdge cloud: say why the connection failed (esp error,
+ errno, free memory), retry the sign-in page once
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ src/SolarEdgeCloud.cpp | 29 +++++++++++++++++++++++++----
+ 1 file changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index a6c6012e..aaf598b3 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -2,6 +2,8 @@
+ #include "SolarEdgeCloud.h"
+ #include "SolarEdge.h"
+ #include <LittleFS.h>
++#include <errno.h>
++#include <esp_heap_caps.h>
+ #include <esp_http_client.h>
+ #include <esp_log.h>
+ #include <esp_system.h>
+@@ -192,6 +194,14 @@ static String cookieHeader(const std::map<String, String>& jar)
+     return s;
+ }
+ 
++// why the last request failed without an HTTP answer (connection, TLS, timeout)
++static String g_netErr;
++
++static String netErrText()
++{
++    return g_netErr + ", wolna pamięć " + String((unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024)) + " kB";
++}
++
+ // one request, no automatic redirects; returns HTTP status or < 0
+ static int httpDo(esp_http_client_method_t method, const String& url, const String& body, const char* ctype,
+     const std::vector<std::pair<const char*, String>>& headers, HttpCtx& ctx)
+@@ -221,7 +231,11 @@ static int httpDo(esp_http_client_method_t method, const String& url, const Stri
+     ctx.truncated = false;
+     const esp_err_t err = esp_http_client_perform(c);
+     const int status = err == ESP_OK ? esp_http_client_get_status_code(c) : -2;
+-    if (err != ESP_OK) ESP_LOGW(TAG, "%s: %s", url.substring(0, 60).c_str(), esp_err_to_name(err));
++    if (err != ESP_OK) {
++        const int en = errno;
++        g_netErr = String(esp_err_to_name(err)) + " (errno " + String(en) + ")";
++        ESP_LOGW(TAG, "%s: %s", url.substring(0, 60).c_str(), g_netErr.c_str());
++    }
+     esp_http_client_cleanup(c);
+     return status;
+ }
+@@ -422,6 +436,10 @@ bool SolarEdgeCloudClass::login()
+     int st = 0;
+     for (int hop = 0; hop < 5; hop++) {
+         st = httpDo(HTTP_METHOD_GET, url, "", nullptr, { { "Accept", "text/html" } }, ctx);
++        if (st < 0) { // one more try: a busy moment (other cloud task in TLS) or a dropped connection
++            vTaskDelay(pdMS_TO_TICKS(3000));
++            st = httpDo(HTTP_METHOD_GET, url, "", nullptr, { { "Accept", "text/html" } }, ctx);
++        }
+         if (st >= 300 && st < 400 && ctx.location.length()) {
+             url = absUrl(ctx.location, LOGIN_BASE);
+             continue;
+@@ -429,7 +447,8 @@ bool SolarEdgeCloudClass::login()
+         break;
+     }
+     if (st != 200) {
+-        setError(String("Logowanie: strona logowania niedostępna (HTTP ") + st + ")");
++        setError(st < 0 ? String("Logowanie: brak połączenia z login.solaredge.com – ") + netErrText()
++                        : String("Logowanie: strona logowania niedostępna (HTTP ") + st + ")");
+         return false;
+     }
+     auto inputs = formInputs(ctx.body);
+@@ -483,7 +502,8 @@ bool SolarEdgeCloudClass::login()
+         { { "Origin", MON_BASE }, { "Referer", String(MON_BASE) + "/" }, { "Accept", "*/*" } }, tctx);
+     JsonDocument d;
+     if (st != 200 || deserializeJson(d, tctx.body) || !d["access_token"].is<const char*>()) {
+-        setError(String("Logowanie: brak tokenu (HTTP ") + st + ")");
++        setError(st < 0 ? String("Logowanie: brak połączenia przy pobieraniu tokenu – ") + netErrText()
++                        : String("Logowanie: brak tokenu (HTTP ") + st + ")");
+         return false;
+     }
+     _access = d["access_token"].as<String>();
+@@ -612,7 +632,8 @@ bool SolarEdgeCloudClass::fetchLayout()
+     int st = 0;
+     if (!api("GET", "/services/layout/logical/generic/v2/site/" + site + "?include-optimizers=true", "", body, st)) {
+         if (st == ST_NO_LOGIN) return false;
+-        setError(String("Układ instalacji: HTTP ") + st + (st == 403 || st == 404 ? " – sprawdź ID instalacji" : ""));
++        setError(st == -2 ? String("Układ instalacji: brak połączenia – ") + netErrText()
++                          : String("Układ instalacji: HTTP ") + st + (st == 403 || st == 404 ? " – sprawdź ID instalacji" : ""));
+         return false;
+     }
+     JsonDocument filter;
+-- 
+2.43.0
+
