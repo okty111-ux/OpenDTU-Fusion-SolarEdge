@@ -1,0 +1,79 @@
+From 67e08d1a119e9d4e03bcb172c472e21c238ef7b0 Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 20:05:32 +0100
+Subject: [PATCH] SolarEdge cloud: read the deep site layout (JSON nesting
+ limit 40), show the parser error and the start of the answer
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ src/SolarEdgeCloud.cpp | 25 +++++++++++++++++++------
+ 1 file changed, 19 insertions(+), 6 deletions(-)
+
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index 4bf71cfb..3d3a718b 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -234,6 +234,17 @@ static const char* stepName(uint32_t n)
+     }
+ }
+ 
++// start of an answer that could not be read as JSON (printable characters only)
++static String jsonHint(const String& b)
++{
++    String t;
++    for (size_t i = 0; i < b.length() && t.length() < 90; i++) {
++        const char c = b[i];
++        if (c >= 32 && c < 127) t += c;
++    }
++    return t.length() ? String(" – ") + t : String();
++}
++
+ // why the last request failed without an HTTP answer (connection, TLS, timeout)
+ static String g_netErr;
+ 
+@@ -846,8 +857,9 @@ bool SolarEdgeCloudClass::fetchLayout()
+     buildFilter(filter.to<JsonObject>(), 9);
+     buildFilter(filter["siteStructure"].to<JsonObject>(), 9); // either wrapped or not
+     JsonDocument d;
+-    if (deserializeJson(d, body, DeserializationOption::Filter(filter))) {
+-        setError("Układ instalacji: niepoprawna odpowiedź");
++    const DeserializationError de = deserializeJson(d, body, DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(40));
++    if (de) {
++        setError(String("Układ instalacji: niepoprawna odpowiedź (") + de.c_str() + ", " + String((unsigned)body.length()) + " B)" + jsonHint(body));
+         return false;
+     }
+     body = String();
+@@ -916,8 +928,9 @@ bool SolarEdgeCloudClass::fetchLive()
+     bf["modules"][0]["manufacturer"] = true;
+     bf["modules"][0]["model"] = true;
+     JsonDocument d;
+-    if (deserializeJson(d, out, DeserializationOption::Filter(filter))) {
+-        setError("Dane optymalizatorów: niepoprawna odpowiedź");
++    const DeserializationError de = deserializeJson(d, out, DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(40));
++    if (de) {
++        setError(String("Dane optymalizatorów: niepoprawna odpowiedź (") + de.c_str() + ", " + String((unsigned)out.length()) + " B)" + jsonHint(out));
+         return false;
+     }
+     const uint32_t now = millis();
+@@ -989,7 +1002,7 @@ bool SolarEdgeCloudClass::fetchByInverter()
+     of["temperature"]["temperature"] = true;
+     of["temperature"]["temperatureUnit"] = true;
+     JsonDocument d;
+-    if (deserializeJson(d, out, DeserializationOption::Filter(filter))) return false;
++    if (deserializeJson(d, out, DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(40))) return false;
+     std::lock_guard<std::mutex> lock(_mutex);
+     for (JsonObjectConst ib : d["inverters"].as<JsonArrayConst>()) {
+         for (JsonObjectConst ob : ib["optimizers"].as<JsonArrayConst>()) {
+@@ -1019,7 +1032,7 @@ float SolarEdgeCloudClass::dashboardWh(const String& start, const String& end, c
+     JsonDocument filter;
+     filter["summary"]["production"] = true;
+     JsonDocument d;
+-    if (deserializeJson(d, out, DeserializationOption::Filter(filter))) return NAN;
++    if (deserializeJson(d, out, DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(40))) return NAN;
+     JsonVariantConst p = d["summary"]["production"];
+     return p.isNull() ? NAN : p.as<float>();
+ }
+-- 
+2.43.0
+
