@@ -1,0 +1,186 @@
+From 55b99a86b8505f612398dc099d0a2057cb49dcd0 Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 17:44:16 +0100
+Subject: [PATCH] SolarEdge cloud: no restart loop - pause after a crash and
+ name the step; no body read after error answers; 16 kB task stack
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/SolarEdgeCloud.h |  1 +
+ src/SolarEdgeCloud.cpp   | 69 ++++++++++++++++++++++++++++++++--------
+ 2 files changed, 56 insertions(+), 14 deletions(-)
+
+diff --git a/include/SolarEdgeCloud.h b/include/SolarEdgeCloud.h
+index e033c2f1..ec32dff7 100644
+--- a/include/SolarEdgeCloud.h
++++ b/include/SolarEdgeCloud.h
+@@ -98,6 +98,7 @@ private:
+     volatile bool _refresh = false;
+     volatile bool _cfgChanged = false;
+     volatile bool _loginBlocked = false; // last login rejected: wait for the user
++    bool _crashPaused = false;           // device restarted from a crash in this task
+     uint32_t _requests = 0, _logins = 0;
+     struct Seen { String meas; uint32_t sinceMs; };
+     std::vector<std::pair<String, Seen>> _seen; // serial -> last measurement stamp
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index ff4224cb..48a4f505 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -3,6 +3,7 @@
+ #include "SolarEdge.h"
+ #include <LittleFS.h>
+ #include <errno.h>
++#include <esp_attr.h>
+ #include <esp_heap_caps.h>
+ #include <esp_http_client.h>
+ #include <esp_log.h>
+@@ -194,6 +195,32 @@ static String cookieHeader(const std::map<String, String>& jar)
+     return s;
+ }
+ 
++// Step of the cloud task, kept over a crash restart (RTC memory is not cleared by
++// a software reset). If the device restarted from a crash during a step, the
++// cloud is paused and the step is shown, instead of a restart loop.
++static RTC_NOINIT_ATTR uint32_t s_crashMagic;
++static RTC_NOINIT_ATTR uint32_t s_step;
++static const uint32_t CRASH_MAGIC = 0x5ECA0D01;
++static void step(uint32_t n)
++{
++    s_crashMagic = CRASH_MAGIC;
++    s_step = n;
++}
++static const char* stepName(uint32_t n)
++{
++    switch (n) {
++    case 1: return "strona logowania";
++    case 2: return "wysłanie formularza logowania";
++    case 3: return "przekierowania po logowaniu";
++    case 4: return "pobieranie tokenu";
++    case 5: return "układ instalacji";
++    case 6: return "dane optymalizatorów";
++    case 7: return "energia optymalizatorów";
++    case 8: return "produkcja";
++    default: return "?";
++    }
++}
++
+ // why the last request failed without an HTTP answer (connection, TLS, timeout)
+ static String g_netErr;
+ 
+@@ -232,19 +259,10 @@ static int httpDo(esp_http_client_method_t method, const String& url, const Stri
+     esp_err_t err = esp_http_client_perform(c);
+     // IDF 4.4: with disable_auto_redirect every answer that is not 2xx (redirect,
+     // but also 4xx/5xx) ends perform() with ESP_ERR_HTTP_MAX_REDIRECT before the
+-    // body is read. The status and headers (Location, cookies) are there, so the
+-    // answer is used; for an error answer the body is read here for the message.
++    // body is read. The status and headers (Location, cookies) are there.
+     if (err == ESP_ERR_HTTP_MAX_REDIRECT) {
+         const int sc = esp_http_client_get_status_code(c);
+-        if (sc >= 100) {
+-            err = ESP_OK;
+-            if (sc >= 400) {
+-                char buf[512];
+-                int n, total = 0;
+-                // the event handler (HTTP_EVENT_ON_DATA) collects what is read here
+-                while (total < 4096 && (n = esp_http_client_read(c, buf, sizeof(buf))) > 0) total += n;
+-            }
+-        }
++        if (sc >= 100) err = ESP_OK; // body of an error answer is not read (only the status is used)
+     }
+     const int status = err == ESP_OK ? esp_http_client_get_status_code(c) : -2;
+     if (err != ESP_OK) {
+@@ -474,6 +492,7 @@ bool SolarEdgeCloudClass::login()
+     // 1. login page (hidden fields + cookies)
+     String url = loginUrl;
+     int st = 0;
++    step(1);
+     for (int hop = 0; hop < 5; hop++) {
+         st = httpDo(HTTP_METHOD_GET, url, "", nullptr, { { "Accept", "text/html" } }, ctx);
+         if (st < 0) { // one more try: a busy moment (other cloud task in TLS) or a dropped connection
+@@ -510,6 +529,7 @@ bool SolarEdgeCloudClass::login()
+     add("password", cfg.password);
+ 
+     // 2. credentials -> redirect with ?code=
++    step(2);
+     st = httpDo(HTTP_METHOD_POST, loginUrl, form, "application/x-www-form-urlencoded",
+         { { "Origin", LOGIN_BASE }, { "Referer", url }, { "Accept", "text/html" } }, ctx);
+     String code;
+@@ -523,6 +543,7 @@ bool SolarEdgeCloudClass::login()
+             const String next = absUrl(ctx.location, LOGIN_BASE);
+             if (!next.startsWith(LOGIN_BASE)) break;
+             lastUrl = next;
++            step(3);
+             st = httpDo(HTTP_METHOD_GET, next, "", nullptr, { { "Accept", "text/html" } }, ctx);
+             continue;
+         }
+@@ -538,6 +559,7 @@ bool SolarEdgeCloudClass::login()
+     const String tokBody = String("grant_type=authorization_code&code=") + urlEnc(code) + "&client_id=" + CLIENT_ID
+         + "&redirect_uri=" + urlEnc(CALLBACK) + "&code_verifier=" + verifier;
+     HttpCtx tctx;
++    step(4);
+     st = httpDo(HTTP_METHOD_POST, String(LOGIN_BASE) + "/oauth2/token", tokBody, "application/x-www-form-urlencoded",
+         { { "Origin", MON_BASE }, { "Referer", String(MON_BASE) + "/" }, { "Accept", "*/*" } }, tctx);
+     JsonDocument d;
+@@ -898,10 +920,14 @@ bool SolarEdgeCloudClass::cycle()
+         _state = "pobieranie";
+     }
+     if (!_haveLayout || millis() - _layoutMs > 2 * 3600000UL) {
++        step(5);
+         if (!fetchLayout()) return false;
+     }
++    step(6);
+     const bool live = fetchLive();
++    step(7);
+     fetchByInverter();
++    step(8);
+     const bool prod = fetchProduction();
+     if (!live && !prod) return false;
+     std::lock_guard<std::mutex> lock(_mutex);
+@@ -918,7 +944,19 @@ void SolarEdgeCloudClass::init()
+ {
+     load();
+     _state = _cfg.enabled ? "oczekuje" : "wyłączone";
+-    if (xTaskCreatePinnedToCore(taskEntry, "secloud", 12288, this, 1, nullptr, 0) != pdPASS) {
++    const esp_reset_reason_t rr = esp_reset_reason();
++    const bool crashed = rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT;
++    if (crashed && s_crashMagic == CRASH_MAGIC && s_step != 0) {
++        _error = String("Poprzednie uruchomienie Fusion zakończyło się awarią podczas: ") + stepName(s_step)
++            + " (" + (rr == ESP_RST_PANIC ? "błąd programu" : "zawieszenie") + "). Pobieranie wstrzymane – kliknij „Pobierz teraz”, aby spróbować ponownie.";
++        _state = "błąd";
++        _loginBlocked = true;
++        _crashPaused = true;
++    }
++    s_crashMagic = CRASH_MAGIC;
++    s_step = 0;
++    // 16 kB: TLS handshake + JSON parsing in this task
++    if (xTaskCreatePinnedToCore(taskEntry, "secloud", 16384, this, 1, nullptr, 0) != pdPASS) {
+         ESP_LOGE(TAG, "task not started");
+     }
+ }
+@@ -941,7 +979,7 @@ void SolarEdgeCloudClass::taskLoop()
+             _loginBlocked = false;
+         }
+         const bool manual = _refresh;
+-        bool due = first || manual || millis() - last >= c.interval * 60000UL + backoff;
++        bool due = (first && !_crashPaused) || manual || millis() - last >= c.interval * 60000UL + backoff;
+         // a rejected login is not retried automatically (the portal locks the account
+         // after repeated attempts) - only after saving settings or "Pobierz teraz"
+         if (_loginBlocked && !manual) due = false;
+@@ -950,9 +988,12 @@ void SolarEdgeCloudClass::taskLoop()
+         if (c.enabled && c.siteId.length() && c.user.length() && online && due) {
+             _refresh = false;
+             _loginBlocked = false;
++            _crashPaused = false;
+             first = false;
+             last = millis();
+-            if (cycle()) {
++            const bool ok = cycle();
++            step(0); // finished without a crash
++            if (ok) {
+                 backoff = 0;
+             } else {
+                 // failed logins: wait longer, the portal blocks repeated attempts
+-- 
+2.43.0
+
