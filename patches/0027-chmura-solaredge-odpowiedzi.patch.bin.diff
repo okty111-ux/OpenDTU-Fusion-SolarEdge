@@ -1,0 +1,85 @@
+From 99604747776cdf42e8880a566414b9fe3a270919 Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 16:10:30 +0100
+Subject: [PATCH] SolarEdge cloud: use every non-2xx answer (IDF 4.4 reports
+ 4xx as ESP_ERR_HTTP_MAX_REDIRECT too), show the portal's error text
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ src/SolarEdgeCloud.cpp | 43 +++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 38 insertions(+), 5 deletions(-)
+
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index 73f02028..ff4224cb 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -230,12 +230,21 @@ static int httpDo(esp_http_client_method_t method, const String& url, const Stri
+     ctx.body = "";
+     ctx.truncated = false;
+     esp_err_t err = esp_http_client_perform(c);
+-    // IDF 4.4: with disable_auto_redirect a 3xx answer ends perform() with
+-    // ESP_ERR_HTTP_MAX_REDIRECT, although the response (status, Location,
+-    // cookies) is complete - the redirect is followed by the caller
++    // IDF 4.4: with disable_auto_redirect every answer that is not 2xx (redirect,
++    // but also 4xx/5xx) ends perform() with ESP_ERR_HTTP_MAX_REDIRECT before the
++    // body is read. The status and headers (Location, cookies) are there, so the
++    // answer is used; for an error answer the body is read here for the message.
+     if (err == ESP_ERR_HTTP_MAX_REDIRECT) {
+         const int sc = esp_http_client_get_status_code(c);
+-        if (sc >= 300 && sc < 400) err = ESP_OK;
++        if (sc >= 100) {
++            err = ESP_OK;
++            if (sc >= 400) {
++                char buf[512];
++                int n, total = 0;
++                // the event handler (HTTP_EVENT_ON_DATA) collects what is read here
++                while (total < 4096 && (n = esp_http_client_read(c, buf, sizeof(buf))) > 0) total += n;
++            }
++        }
+     }
+     const int status = err == ESP_OK ? esp_http_client_get_status_code(c) : -2;
+     if (err != ESP_OK) {
+@@ -409,6 +418,30 @@ static String loginFailText(const HttpCtx& ctx, int st, const String& lastUrl, s
+     return s;
+ }
+ 
++// short readable start of an error answer (title or text without tags)
++static String bodyHint(const String& html)
++{
++    String t;
++    int p = html.indexOf("<title>");
++    if (p >= 0) {
++        const int e = html.indexOf("</title>", p);
++        if (e > p) t = html.substring(p + 7, e);
++    }
++    if (t.isEmpty()) {
++        bool tag = false;
++        for (size_t i = 0; i < html.length() && t.length() < 140; i++) {
++            const char c = html[i];
++            if (c == '<') { tag = true; continue; }
++            if (c == '>') { tag = false; t += ' '; continue; }
++            if (!tag && c != '\r' && c != '\n' && c != '\t') t += c;
++        }
++    }
++    t.trim();
++    while (t.indexOf("  ") >= 0) t.replace("  ", " ");
++    if (t.length() > 140) t = t.substring(0, 140);
++    return t.length() ? String(" – ") + t : String();
++}
++
+ bool SolarEdgeCloudClass::login()
+ {
+     SeCloudConfig cfg = getConfig();
+@@ -455,7 +488,7 @@ bool SolarEdgeCloudClass::login()
+     }
+     if (st != 200) {
+         setError(st < 0 ? String("Logowanie: brak połączenia z login.solaredge.com – ") + netErrText()
+-                        : String("Logowanie: strona logowania niedostępna (HTTP ") + st + ")");
++                        : String("Logowanie: portal odrzucił zapytanie (HTTP ") + st + ")" + bodyHint(ctx.body));
+         return false;
+     }
+     auto inputs = formInputs(ctx.body);
+-- 
+2.43.0
+
