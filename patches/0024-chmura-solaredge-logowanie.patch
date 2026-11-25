@@ -1,0 +1,232 @@
+From d244d337f3a5b61a98d1a0a6d7992273a2a51f4a Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 14:37:52 +0100
+Subject: [PATCH] SolarEdge cloud: real login error instead of 'HTTP
+ <garbage>', no automatic retry after a rejected login
+
+The status of a request that never ran (login failed) was uninitialized and
+replaced the login error. The managed sign-in page carries all its
+translations, so the reason is now read from the form result (actionData)
+or the page path (verification code). A rejected login is retried only after
+saving the settings or 'Pobierz teraz', so the portal does not lock the account.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/FusionPages.h    |  2 +-
+ include/SolarEdgeCloud.h |  1 +
+ src/SolarEdgeCloud.cpp   | 90 +++++++++++++++++++++++++++++++++++-----
+ 3 files changed, 82 insertions(+), 11 deletions(-)
+
+diff --git a/include/FusionPages.h b/include/FusionPages.h
+index 07570b9e..4934dc3a 100644
+--- a/include/FusionPages.h
++++ b/include/FusionPages.h
+@@ -978,7 +978,7 @@ function render(c){
+   const s=!c.enabled?['wyłączone','']:(c.state==='połączono'?['połączono','ok']:(c.state==='błąd'?['błąd','err']:[c.state,'']));
+   $('st').innerHTML=`<span class="pill ${s[1]}">${esc(s[0])}</span>`;
+   $('stT').textContent=c.last_ok>1600000000?'ostatnie dane: '+new Date(c.last_ok*1000).toLocaleString('pl-PL'):'';
+-  const e=$('err');if(c.enabled&&c.error){e.style.display='';e.textContent=c.error;}else e.style.display='none';
++  const e=$('err');if(c.enabled&&c.error){e.style.display='';e.textContent=c.error+(c.paused?' — Fusion nie próbuje ponownie sam (żeby portal nie zablokował konta). Popraw dane i kliknij „Zapisz i połącz” albo „Pobierz teraz”.':'');}else e.style.display='none';
+   $('kv').innerHTML=[['Moc teraz (suma optymalizatorów)',c.power==null?'–':nf(c.power)+' W'],['Dziś',kwh(c.today_wh)],['W tym miesiącu',kwh(c.month_wh)],['W tym roku',kwh(c.year_wh)],['Łącznie',kwh(c.total_wh)],
+     ['Falownik',c.inverter?(c.inverter_name?c.inverter_name+' · ':'')+c.inverter:'–'],['Moc szczytowa',c.peak_kw==null?'–':nf(c.peak_kw,2)+' kWp'],['Data uruchomienia',c.install_date||'–'],['Zapytania / logowania',c.requests+' / '+c.logins]]
+     .map(([a,b])=>`<div><span>${a}</span><b>${esc(b)}</b></div>`).join('');
+diff --git a/include/SolarEdgeCloud.h b/include/SolarEdgeCloud.h
+index 34d8b9a3..e033c2f1 100644
+--- a/include/SolarEdgeCloud.h
++++ b/include/SolarEdgeCloud.h
+@@ -97,6 +97,7 @@ private:
+     bool _haveLayout = false;
+     volatile bool _refresh = false;
+     volatile bool _cfgChanged = false;
++    volatile bool _loginBlocked = false; // last login rejected: wait for the user
+     uint32_t _requests = 0, _logins = 0;
+     struct Seen { String meas; uint32_t sinceMs; };
+     std::vector<std::pair<String, Seen>> _seen; // serial -> last measurement stamp
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index b2cb9177..a6c6012e 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -26,6 +26,7 @@ static const char* CLIENT_ID = "ugfnsujd3384sshcjehaphlh3";
+ static const char* CALLBACK = "https://monitoring.solaredge.com/mfe/auth/callback";
+ static const char* UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
+ static const size_t MAX_BODY = 256 * 1024;
++static const int ST_NO_LOGIN = -100; // api(): not logged in, login() has set the error
+ 
+ // ---------------------------------------------------------------- helpers
+ static String urlEnc(const String& s)
+@@ -330,6 +331,63 @@ void SolarEdgeCloudClass::setError(const String& e)
+ }
+ 
+ // ---------------------------------------------------------------- OAuth
++static bool has(const String& h, const char* s) { return h.indexOf(s) >= 0; }
++
++// readable reason why the portal did not give an authorization code.
++// The sign-in page (AWS Cognito managed login, a Remix app) carries all its
++// translations, so plain keyword search on the page means nothing: the result of
++// the form post is in window.__remixContext ... "actionData":{...}, and a further
++// step (verification code, new password) shows as a different page path.
++static String loginFailText(const HttpCtx& ctx, int st, const String& lastUrl, size_t fields)
++{
++    String path = ctx.location.length() ? ctx.location : lastUrl;
++    int q = path.indexOf('?');
++    if (q >= 0) path = path.substring(0, q);
++    q = path.indexOf("://");
++    if (q >= 0) {
++        const int sl = path.indexOf('/', q + 3);
++        path = sl >= 0 ? path.substring(sl) : String("/");
++    }
++    String ad;
++    int p = ctx.body.indexOf("\"actionData\":");
++    if (p >= 0) {
++        p += 13;
++        if (!ctx.body.substring(p, p + 4).equals("null")) ad = ctx.body.substring(p, p + 300);
++    }
++    String low = ad;
++    low.toLowerCase();
++    String lp = path;
++    lp.toLowerCase();
++    String why;
++    if (has(low, "usernameorpassword") || has(low, "incorrect"))
++        why = "nieprawidłowy e-mail lub hasło";
++    else if (has(low, "attemptsexceeded") || has(low, "attempts exceeded") || has(low, "too many") || has(low, "limitexceeded"))
++        why = "portal zablokował logowanie po zbyt wielu próbach – odczekaj kilka godzin";
++    else if (has(low, "usernotfound") || has(low, "does not exist"))
++        why = "nie ma konta z tym e-mailem";
++    else if (has(low, "captcha") || has(lp, "captcha"))
++        why = "portal żąda CAPTCHA – zaloguj się raz w przeglądarce i spróbuj ponownie";
++    else if (has(lp, "mfa") || has(lp, "otp") || has(lp, "code") || has(lp, "verify") || has(lp, "totp") || has(lp, "sms"))
++        why = "portal wymaga kodu weryfikacyjnego (2FA) – wyłącz weryfikację dwuetapową na koncie";
++    else if (has(lp, "password") && !has(lp, "login"))
++        why = "portal wymaga zmiany hasła – zaloguj się w przeglądarce i ustaw nowe";
++    else
++        why = "portal nie przyjął logowania";
++    String s = String("Logowanie: ") + why + " (HTTP " + String(st) + ", " + path.substring(0, 50) + ", pól " + String((unsigned)fields) + ")";
++    if (ad.length() && why.endsWith("logowania")) {
++        // unknown answer: show it, it helps to adapt the login
++        String t;
++        for (size_t i = 0; i < ad.length() && t.length() < 160; i++) {
++            const char c = ad[i];
++            if (c == '"' || c == '{' || c == '}' || c == '\\') continue;
++            t += c;
++        }
++        s += " – odpowiedź: ";
++        s += t;
++    }
++    return s;
++}
++
+ bool SolarEdgeCloudClass::login()
+ {
+     SeCloudConfig cfg = getConfig();
+@@ -396,6 +454,7 @@ bool SolarEdgeCloudClass::login()
+     st = httpDo(HTTP_METHOD_POST, loginUrl, form, "application/x-www-form-urlencoded",
+         { { "Origin", LOGIN_BASE }, { "Referer", url }, { "Accept", "text/html" } }, ctx);
+     String code;
++    String lastUrl = loginUrl;
+     for (int hop = 0; hop < 6; hop++) {
+         if (ctx.location.indexOf("/mfe/auth/callback") >= 0) {
+             code = queryParam(ctx.location, "code");
+@@ -404,15 +463,15 @@ bool SolarEdgeCloudClass::login()
+         if ((st >= 300 && st < 400) || (st == 204 && ctx.location.length())) {
+             const String next = absUrl(ctx.location, LOGIN_BASE);
+             if (!next.startsWith(LOGIN_BASE)) break;
++            lastUrl = next;
+             st = httpDo(HTTP_METHOD_GET, next, "", nullptr, { { "Accept", "text/html" } }, ctx);
+             continue;
+         }
+         break;
+     }
+     if (code.isEmpty()) {
+-        const bool mfa = ctx.body.indexOf("mfa") >= 0 || ctx.body.indexOf("verification") >= 0 || ctx.body.indexOf("totp") >= 0;
+-        setError(mfa ? String("Logowanie: portal wymaga kodu weryfikacyjnego (2FA) – wyłącz weryfikację dwuetapową")
+-                     : String("Logowanie nieudane – sprawdź e-mail i hasło (HTTP ") + st + ")");
++        setError(loginFailText(ctx, st, lastUrl, inputs.size()));
++        _loginBlocked = true;
+         return false;
+     }
+ 
+@@ -468,7 +527,10 @@ bool SolarEdgeCloudClass::ensureToken()
+ bool SolarEdgeCloudClass::api(const char* method, const String& path, const String& body, String& out, int& status)
+ {
+     for (int attempt = 0; attempt < 2; attempt++) {
+-        if (!ensureToken()) return false;
++        if (!ensureToken()) {
++            status = ST_NO_LOGIN; // error text already set by login()
++            return false;
++        }
+         HttpCtx ctx;
+         const bool post = !strcmp(method, "POST");
+         status = httpDo(post ? HTTP_METHOD_POST : HTTP_METHOD_GET, String(MON_BASE) + path, body, post ? "application/json" : nullptr,
+@@ -547,8 +609,9 @@ bool SolarEdgeCloudClass::fetchLayout()
+ {
+     const String site = getConfig().siteId;
+     String body;
+-    int st;
++    int st = 0;
+     if (!api("GET", "/services/layout/logical/generic/v2/site/" + site + "?include-optimizers=true", "", body, st)) {
++        if (st == ST_NO_LOGIN) return false;
+         setError(String("Układ instalacji: HTTP ") + st + (st == 403 || st == 404 ? " – sprawdź ID instalacji" : ""));
+         return false;
+     }
+@@ -612,9 +675,9 @@ bool SolarEdgeCloudClass::fetchLive()
+     for (auto& s : serials) req.add(s);
+     String body, out;
+     serializeJson(req, body);
+-    int st;
++    int st = 0;
+     if (!api("POST", "/services/layout/information/optimizers", body, out, st)) {
+-        setError(String("Dane optymalizatorów: HTTP ") + st);
++        if (st != ST_NO_LOGIN) setError(String("Dane optymalizatorów: HTTP ") + st);
+         return false;
+     }
+     JsonDocument filter;
+@@ -688,7 +751,7 @@ bool SolarEdgeCloudClass::fetchByInverter()
+     if (inv.isEmpty() || !getLocalTime(&t, 5)) return true;
+     const String today = isoDate(t);
+     String out;
+-    int st;
++    int st = 0;
+     const String path = "/services/layout/energy/site/" + getConfig().siteId + "/by-inverter?start-date=" + today + "&end-date=" + today
+         + "&inverter-serials=" + urlEnc(inv) + "&include-max-temperature=true";
+     if (!api("GET", path, "", out, st)) return false; // optional data
+@@ -722,7 +785,7 @@ bool SolarEdgeCloudClass::fetchByInverter()
+ float SolarEdgeCloudClass::dashboardWh(const String& start, const String& end, const char* unit)
+ {
+     String out;
+-    int st;
++    int st = 0;
+     const String path = "/services/dashboard/energy/sites/" + getConfig().siteId + "?start-date=" + start + "&end-date=" + end
+         + "&chart-time-unit=" + unit + "&measurement-types=production";
+     if (!api("GET", path, "", out, st)) return NAN;
+@@ -814,12 +877,18 @@ void SolarEdgeCloudClass::taskLoop()
+         if (_cfgChanged) {
+             _cfgChanged = false;
+             backoff = 0;
++            _loginBlocked = false;
+         }
+-        const bool due = first || _refresh || millis() - last >= c.interval * 60000UL + backoff;
++        const bool manual = _refresh;
++        bool due = first || manual || millis() - last >= c.interval * 60000UL + backoff;
++        // a rejected login is not retried automatically (the portal locks the account
++        // after repeated attempts) - only after saving settings or "Pobierz teraz"
++        if (_loginBlocked && !manual) due = false;
+         struct tm t;
+         const bool online = getLocalTime(&t, 5) && t.tm_year >= (2024 - 1900);
+         if (c.enabled && c.siteId.length() && c.user.length() && online && due) {
+             _refresh = false;
++            _loginBlocked = false;
+             first = false;
+             last = millis();
+             if (cycle()) {
+@@ -865,6 +934,7 @@ void SolarEdgeCloudClass::toJson(JsonVariant root)
+     root["error"] = _error;
+     root["requests"] = _requests;
+     root["logins"] = _logins;
++    root["paused"] = _loginBlocked;
+     root["valid"] = _data.valid;
+     root["last_ok"] = (uint32_t)_data.lastOkEpoch;
+     root["age_s"] = _data.valid ? (millis() - _data.lastOkMs) / 1000 : 0;
+-- 
+2.43.0
+
