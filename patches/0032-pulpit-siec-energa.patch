@@ -1,0 +1,49 @@
+From b16ee13b27ca78c4c2ad5788172c8a3b8face1dc Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 20:23:44 +0100
+Subject: [PATCH] =?UTF-8?q?Dashboard:=20grid=20tile=20shows=20Energa=20M?=
+ =?UTF-8?q?=C3=B3j=20Licznik=20import/export=20when=20there=20is=20no=20lo?=
+ =?UTF-8?q?cal=20meter?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index 50940f4b..e66566e4 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -390,7 +390,7 @@ function render(h){
+   $('hoyS').innerHTML=L.hoy_producing?'<span class="pill ok">produkuje</span>':(L.hoy_reachable?'<span class="pill">osiągalny</span>':'<span class="pill">uśpiony</span>');
+   $('seW').textContent=L.se_valid?w(L.se_w):'0 W';
+   $('seS').innerHTML=L.se_valid?`<span class="pill ${L.se_status==4?'ok':(L.se_status==7?'warn':'')}">${SE[L.se_status]||L.se_status_text}</span>`:'<span class="pill warn">offline</span>';
+-  if(L.grid_w===undefined){$('gridW').textContent='–';$('gridS').innerHTML='<span class="pill">brak licznika</span>'}
++  if(L.grid_w===undefined){const g=energaGrid(h);if(g){$('gridW').innerHTML=g.v;$('gridS').innerHTML=g.s}else{$('gridW').textContent='–';$('gridS').innerHTML='<span class="pill">brak licznika</span>'}}
+   else{$('gridW').textContent=w(Math.abs(L.grid_w));$('gridS').innerHTML=L.grid_w>=0?'<span class="pill ok">eksport</span>':'<span class="pill warn">pobór</span>'}
+   const cm=(h.months||[]).slice(-1)[0],cy=(h.years||[]).slice(-1)[0];
+   const ev=(id,v)=>{const [a,b]=kwhU(v);$(id).innerHTML=a+'<small> '+b+'</small>'};
+@@ -399,6 +399,16 @@ function render(h){
+   mppt(h);roofs(h);scene(h);tables();drawChart();
+   $('foot').textContent=`Odświeżanie co 30 s · zapis do pamięci flash co ${h.save_interval_min} min i o północy · dane lokalne, bez chmury`;
+ }
++// no local meter: energy from/to the grid as published by Energa Mój Licznik (hourly, with delay)
++function energaGrid(h){
++  const E=h.energa;if(!E||!E.enabled)return null;
++  const pick=d=>{if(!d||!d.imp)return null;let i=0,e=0,last=-1;for(let k=0;k<24;k++){const a=d.imp[k],b=d.exp?d.exp[k]:null;if(a!=null||b!=null){i+=+a||0;e+=+b||0;last=k}}return last<0?null:{i,e,last,date:d.date}};
++  const t=pick(E.today),y=pick(E.yesterday),d=t||y;if(!d)return null;
++  const k=v=>nf(v,v<10?2:1);
++  const when=t?('dziś do '+String(d.last+1).padStart(2,'0')+':00'):'wczoraj';
++  return {v:'<span style="font-size:.62em;line-height:1.25;display:block">↓ '+k(d.i)+' kWh<br>↑ '+k(d.e)+' kWh</span>',
++          s:'<span class="pill" title="Energa Mój Licznik – dane godzinowe publikowane z opóźnieniem">Energa · '+when+'</span>'};
++}
+ function mppt(h){
+   const M=h.mppt||[];$('mppt').style.display=M.length?'':'none';
+   const multi=new Set(M.map(m=>m.inv_idx)).size>1,dash='<span class="mu">–</span>';
+-- 
+2.43.0
+
