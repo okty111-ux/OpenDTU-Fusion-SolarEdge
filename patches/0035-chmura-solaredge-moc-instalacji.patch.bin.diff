@@ -1,0 +1,95 @@
+From feabedfa140437492aea96bc3287b5d0bf043eed Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 12:29:51 +0100
+Subject: [PATCH] SolarEdge cloud: power from the growth of the site's
+ production (as in the SolarEdge app), not from lagging optimizer values
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/FusionPages.h    |  2 +-
+ include/SolarEdgeCloud.h |  4 ++++
+ src/SolarEdgeCloud.cpp   | 31 +++++++++++++++++++++++++++++++
+ 3 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/include/FusionPages.h b/include/FusionPages.h
+index 4934dc3a..01d89435 100644
+--- a/include/FusionPages.h
++++ b/include/FusionPages.h
+@@ -979,7 +979,7 @@ function render(c){
+   $('st').innerHTML=`<span class="pill ${s[1]}">${esc(s[0])}</span>`;
+   $('stT').textContent=c.last_ok>1600000000?'ostatnie dane: '+new Date(c.last_ok*1000).toLocaleString('pl-PL'):'';
+   const e=$('err');if(c.enabled&&c.error){e.style.display='';e.textContent=c.error+(c.paused?' — Fusion nie próbuje ponownie sam (żeby portal nie zablokował konta). Popraw dane i kliknij „Zapisz i połącz” albo „Pobierz teraz”.':'');}else e.style.display='none';
+-  $('kv').innerHTML=[['Moc teraz (suma optymalizatorów)',c.power==null?'–':nf(c.power)+' W'],['Dziś',kwh(c.today_wh)],['W tym miesiącu',kwh(c.month_wh)],['W tym roku',kwh(c.year_wh)],['Łącznie',kwh(c.total_wh)],
++  $('kv').innerHTML=[['Moc teraz (z produkcji instalacji)',c.power==null?'–':nf(c.power)+' W'],['Dziś',kwh(c.today_wh)],['W tym miesiącu',kwh(c.month_wh)],['W tym roku',kwh(c.year_wh)],['Łącznie',kwh(c.total_wh)],
+     ['Falownik',c.inverter?(c.inverter_name?c.inverter_name+' · ':'')+c.inverter:'–'],['Moc szczytowa',c.peak_kw==null?'–':nf(c.peak_kw,2)+' kWp'],['Data uruchomienia',c.install_date||'–'],['Zapytania / logowania',c.requests+' / '+c.logins]]
+     .map(([a,b])=>`<div><span>${a}</span><b>${esc(b)}</b></div>`).join('');
+   const o=c.optimizers||[];$('optSec').style.display=o.length?'':'none';
+diff --git a/include/SolarEdgeCloud.h b/include/SolarEdgeCloud.h
+index ec32dff7..fab64714 100644
+--- a/include/SolarEdgeCloud.h
++++ b/include/SolarEdgeCloud.h
+@@ -103,6 +103,10 @@ private:
+     struct Seen { String meas; uint32_t sinceMs; };
+     std::vector<std::pair<String, Seen>> _seen; // serial -> last measurement stamp
+     std::vector<String> _roofMap;              // slot -> optimizer serial ("" = automatic)
++    // site power from the growth of today's production
++    String _prodDay;
++    float _prodPrevWh = NAN, _prodPowerW = NAN;
++    time_t _prodPrevT = 0, _prodChangeT = 0;
+ };
+ 
+ extern SolarEdgeCloudClass SolarEdgeCloud;
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index ad5e2fc9..eb90f5a3 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -1108,6 +1108,31 @@ bool SolarEdgeCloudClass::fetchProduction()
+     _data.monthWh = m;
+     _data.yearWh = y;
+     if (!isnan(tot)) _data.totalWh = tot;
++
++    // Power of the whole site from the growth of today's production (the portal
++    // adds energy every 15 minutes). The optimizer values lag behind or stay at
++    // old small numbers, the site production is what the SolarEdge app shows.
++    const time_t now = time(nullptr);
++    if (!isnan(d)) {
++        if (_prodDay != today) {
++            _prodDay = today;
++            _prodPrevWh = NAN;
++            _prodPowerW = NAN;
++        }
++        if (isnan(_prodPrevWh)) {
++            _prodPrevWh = d;
++            _prodPrevT = now;
++            _prodChangeT = now;
++        } else if (d > _prodPrevWh + 0.5f) {
++            const double dt = difftime(now, _prodPrevT);
++            if (dt >= 240) _prodPowerW = (d - _prodPrevWh) * 3600.0 / dt;
++            _prodPrevWh = d;
++            _prodPrevT = now;
++            _prodChangeT = now;
++        } else if (difftime(now, _prodChangeT) > 45 * 60) {
++            _prodPowerW = 0; // no growth for 45 min
++        }
++    }
+     return true;
+ }
+ 
+@@ -1128,7 +1153,13 @@ bool SolarEdgeCloudClass::cycle()
+     step(8);
+     const bool prod = fetchProduction();
+     if (!live && !prod) return false;
++    const bool night = SunPosition.isSunsetAvailable() && !SunPosition.isDayPeriod();
+     std::lock_guard<std::mutex> lock(_mutex);
++    if (night) {
++        _data.powerW = 0;
++    } else if (!isnan(_prodPowerW)) {
++        _data.powerW = _prodPowerW; // site production preferred over the optimizer sum
++    }
+     _data.valid = true;
+     _data.lastOkMs = millis();
+     _data.lastOkEpoch = time(nullptr);
+-- 
+2.43.0
+
