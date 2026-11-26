@@ -1,0 +1,118 @@
+From 0db2aac6118208c67e0f7ae7a50b4d826cb54673 Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 09:24:49 +0100
+Subject: [PATCH] SolarEdge cloud: current power also from the growth of
+ 'today' (optimizer values lag), optimizer values stale only after 2 h
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ9fZxRGdkznCGaZYbo
+---
+ include/SolarEdgeCloud.h |  6 ++++++
+ src/SolarEdgeCloud.cpp   | 38 +++++++++++++++++++++++++++++++++++---
+ 2 files changed, 41 insertions(+), 3 deletions(-)
+
+diff --git a/include/SolarEdgeCloud.h b/include/SolarEdgeCloud.h
+index 40793ff..e618e61 100644
+--- a/include/SolarEdgeCloud.h
++++ b/include/SolarEdgeCloud.h
+@@ -49,6 +49,7 @@ struct SeCloudData {
+     String inverterSerial, inverterName, installDate;
+     float peakKw = NAN;
+     float powerW = NAN;     // sum of optimizer power (last portal values)
++    float energyPowerW = NAN; // average power from the growth of 'today' between portal updates
+     float todayWh = NAN, monthWh = NAN, yearWh = NAN, totalWh = NAN;
+     String todayDate; // local date (YYYY-MM-DD) todayWh belongs to
+     std::vector<SeCloudOptimizer> optimizers;
+@@ -106,6 +107,11 @@ private:
+     struct Seen { String meas; uint32_t sinceMs; };
+     std::vector<std::pair<String, Seen>> _seen; // serial -> last measurement stamp
+     std::vector<String> _roofMap;              // slot -> optimizer serial ("" = automatic)
++    // last change of the portal's 'today' value (for energyPowerW)
++    float _prevTodayWh = NAN;
++    time_t _prevTodayT = 0;
++    String _prevTodayDate;
++    float currentPowerW() const; // _mutex held
+ };
+ 
+ extern SolarEdgeCloudClass SolarEdgeCloud;
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index 5523286..1c9edcf 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -999,8 +999,11 @@ bool SolarEdgeCloudClass::fetchLive()
+                 _seen.push_back({ o.serial, { o.lastMeas, now } });
+                 o.stale = false;
+             }
++            // the portal delivers optimizer telemetry with a delay of 15-60 min
++            // (more in the morning), so only clearly old values count as stale;
++            // a negative age (stamp in another time zone) is ignored
+             const long age = measAgeS(o.lastMeas);
+-            if (age >= 0) o.stale = age > 1800;
++            if (age >= 0) o.stale = age > 7200;
+             if (night) o.stale = true;
+         }
+         for (JsonObjectConst b : d["basicInformationList"].as<JsonArrayConst>()) {
+@@ -1104,6 +1107,24 @@ bool SolarEdgeCloudClass::fetchProduction()
+         return false;
+     }
+     std::lock_guard<std::mutex> lock(_mutex);
++    // average power since the last change of 'today' (the portal updates it every
++    // 15 min): the inverter's real production, not the delayed optimizer values
++    const time_t nowT = time(nullptr);
++    if (!isnan(d)) {
++        if (_prevTodayDate != today || isnan(_prevTodayWh) || d < _prevTodayWh) {
++            _prevTodayWh = d;
++            _prevTodayT = nowT;
++            _prevTodayDate = today;
++            _data.energyPowerW = NAN;
++        } else if (d > _prevTodayWh) {
++            const double dt = difftime(nowT, _prevTodayT);
++            if (dt >= 240 && dt <= 3 * 3600) _data.energyPowerW = (d - _prevTodayWh) * 3600.0 / dt;
++            _prevTodayWh = d;
++            _prevTodayT = nowT;
++        } else if (difftime(nowT, _prevTodayT) > 3600) {
++            _data.energyPowerW = 0; // no growth for an hour
++        }
++    }
+     _data.todayWh = d;
+     _data.todayDate = today;
+     _data.monthWh = m;
+@@ -1214,7 +1235,7 @@ bool SolarEdgeCloudClass::fill(SolarEdgeData& d)
+     d.manufacturer = "SolarEdge";
+     d.model = "dane z chmury SolarEdge";
+     d.serial = _data.inverterSerial;
+-    const float p = isnan(_data.powerW) ? 0.0f : _data.powerW;
++    const float p = currentPowerW();
+     d.acPower = p;
+     d.dcPower = p;
+     if (!isnan(_data.totalWh)) d.energyTotal = _data.totalWh;
+@@ -1223,6 +1244,15 @@ bool SolarEdgeCloudClass::fill(SolarEdgeData& d)
+     return true;
+ }
+ 
++float SolarEdgeCloudClass::currentPowerW() const
++{
++    // the larger of: fresh optimizer values, power from the growth of 'today'
++    float p = isnan(_data.powerW) ? 0.0f : _data.powerW;
++    if (!isnan(_data.energyPowerW) && _data.energyPowerW > p) p = _data.energyPowerW;
++    if (SunPosition.isSunsetAvailable() && !SunPosition.isDayPeriod()) p = 0; // night
++    return p;
++}
++
+ bool SolarEdgeCloudClass::todayWh(const char* date, float& wh)
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+@@ -1254,7 +1284,9 @@ void SolarEdgeCloudClass::toJson(JsonVariant root)
+         if (isnan(f)) v.set(nullptr); else v.set(f);
+     };
+     num(root["peak_kw"], _data.peakKw);
+-    num(root["power"], _data.powerW);
++    num(root["power"], _data.valid ? currentPowerW() : NAN);
++    num(root["power_opt"], _data.powerW);
++    num(root["power_energy"], _data.energyPowerW);
+     num(root["today_wh"], _data.todayWh);
+     num(root["month_wh"], _data.monthWh);
+     num(root["year_wh"], _data.yearWh);
+-- 
+2.43.0
+
