@@ -1,0 +1,97 @@
+From a248901652a5cc05e9c945c5dbd39bd087b683ad Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 22:05:00 +0100
+Subject: [PATCH] SolarEdge cloud: 0 W at night - optimizer values count as old
+ by their time stamp (>30 min) and always after sunset
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ src/SolarEdgeCloud.cpp | 43 +++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index 3d3a718b..ad5e2fc9 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ #include "SolarEdgeCloud.h"
+ #include "SolarEdge.h"
++#include "SunPosition.h"
+ #include <LittleFS.h>
+ #include <errno.h>
+ #include <esp_attr.h>
+@@ -902,6 +903,40 @@ bool SolarEdgeCloudClass::fetchLayout()
+     return true;
+ }
+ 
++// age in seconds of a portal measurement stamp (epoch s/ms or "YYYY-MM-DD HH:MM:SS",
++// local time of the site); -1 if unknown or the clock is not set
++static long measAgeS(const String& m)
++{
++    const time_t now = time(nullptr);
++    if (now < 1700000000 || m.length() < 8) return -1;
++    bool digits = true;
++    for (size_t i = 0; i < m.length(); i++) {
++        if (!isdigit((uint8_t)m[i]) && m[i] != '.') { digits = false; break; }
++    }
++    time_t t = 0;
++    if (digits) {
++        double v = atof(m.c_str());
++        if (v > 1e12) v /= 1000.0;
++        t = (time_t)v;
++    } else {
++        struct tm tm = {};
++        if (sscanf(m.c_str(), "%d-%d-%d%*c%d:%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec) < 5) return -1;
++        tm.tm_year -= 1900;
++        tm.tm_mon -= 1;
++        tm.tm_isdst = -1;
++        t = mktime(&tm);
++        if (m.endsWith("Z")) { // UTC stamp: mktime took it as local time
++            struct tm g, l;
++            gmtime_r(&now, &g);
++            localtime_r(&now, &l);
++            g.tm_isdst = l.tm_isdst;
++            t += (long)difftime(mktime(&l), mktime(&g));
++        }
++    }
++    if (t < 1600000000) return -1;
++    return (long)difftime(now, t);
++}
++
+ bool SolarEdgeCloudClass::fetchLive()
+ {
+     std::vector<String> serials;
+@@ -934,6 +969,7 @@ bool SolarEdgeCloudClass::fetchLive()
+         return false;
+     }
+     const uint32_t now = millis();
++    const bool night = SunPosition.isSunsetAvailable() && !SunPosition.isDayPeriod();
+     std::lock_guard<std::mutex> lock(_mutex);
+     float sum = 0;
+     bool any = false;
+@@ -948,7 +984,9 @@ bool SolarEdgeCloudClass::fetchLive()
+             o.uOpt = num(l["optimizerVoltage_V"]);
+             o.lastMeas = l["lastMeasurement"].is<const char*>() ? l["lastMeasurement"].as<String>()
+                                                                : (l["lastMeasurement"].isNull() ? String() : String(l["lastMeasurement"].as<double>(), 0));
+-            // stale = the portal shows the same measurement for more than an hour (night)
++            // stale = the last measurement is old (the optimizers stop reporting at
++            // night and the portal keeps showing the last small values), judged by its
++            // time stamp, else by "unchanged for an hour", and always at night
+             bool found = false;
+             for (auto& s : _seen) {
+                 if (s.first == o.serial) {
+@@ -961,6 +999,9 @@ bool SolarEdgeCloudClass::fetchLive()
+                 _seen.push_back({ o.serial, { o.lastMeas, now } });
+                 o.stale = false;
+             }
++            const long age = measAgeS(o.lastMeas);
++            if (age >= 0) o.stale = age > 1800;
++            if (night) o.stale = true;
+         }
+         for (JsonObjectConst b : d["basicInformationList"].as<JsonArrayConst>()) {
+             if (o.serial != (b["serial"] | "")) continue;
+-- 
+2.43.0
+
