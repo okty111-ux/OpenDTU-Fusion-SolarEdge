@@ -1,0 +1,36 @@
+From bf63e728f7cb9ad0f8a788679e37a4f18a68f678 Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 14:33:08 +0100
+Subject: [PATCH] Dashboard roof: SolarEdge panels show an estimate (site power
+ split by today's energy share) when the optimizer values in the portal are
+ old
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/HistoryPage.h | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/include/HistoryPage.h b/include/HistoryPage.h
+index e66566e4..8623d046 100644
+--- a/include/HistoryPage.h
++++ b/include/HistoryPage.h
+@@ -494,7 +494,14 @@ function roofs(h){LASTH=h;
+     ps.forEach((e,j)=>hm.push({n:'MPPT '+m.ch+(ps.length>1?' · panel '+(j+1):'')+' – '+e.name,w:m.reachable?e.p:null,wp:e.wp,u:m.reachable?e.u:null,i:m.reachable?e.i:null,wh:e.yd,off:!m.reachable,src:'Hoymiles (szacunek z MPPT)'}));});
+   let se=[];SEC=C;if(C&&C.opt&&C.opt.length){const wp=C.peak_kw?C.peak_kw*1000/C.opt.length:400;
+     const order=ED.on?ED.order:seOrder(C);
+-    se=order.map((sn,k)=>{const o=C.opt.find(z=>z.sn===sn)||{};return {sn,slot:k,n:o.n+(o.s?' · string '+o.s:''),w:o.st?0:o.p,wp,u:o.u,i:o.i,wh:o.wh,t:o.t,pm:o.pm,off:!C.valid,src:'SolarEdge (optymalizator, chmura)',lab:ED.on?String(o.n||'?').split('.').slice(-2).join('.'):null};});}
++    // optimizer values in the portal lag behind the site production: when they are old,
++    // split the current SolarEdge power over the panels by their share of today's energy
++    const seNow=L.se_valid?(+L.se_w||0):0,fresh=C.opt.filter(o=>!o.st&&o.p!=null),fs=fresh.reduce((a,o)=>a+(+o.p||0),0);
++    const whs=C.opt.reduce((a,o)=>a+(+o.wh||0),0),est=seNow>0&&(fresh.length===0||fs<seNow*0.3);
++    se=order.map((sn,k)=>{const o=C.opt.find(z=>z.sn===sn)||{};
++      const share=whs>0?(+o.wh||0)/whs:1/C.opt.length,pw=est?seNow*share:(o.st?0:o.p);
++      return {sn,slot:k,n:o.n+(o.s?' · string '+o.s:''),w:pw,wp,u:est?null:o.u,i:est?null:o.i,wh:o.wh,t:o.t,pm:o.pm,off:!C.valid,
++        src:est?'SolarEdge – szacunek: moc instalacji podzielona wg dzisiejszej energii panelu (dane optymalizatora z chmury są opóźnione)':'SolarEdge (optymalizator, chmura)',lab:ED.on?String(o.n||'?').split('.').slice(-2).join('.'):null};});}
+   const head=(t,n,v,col)=>`<div class="rhd"><b>${t}</b><span class="mu">${n?n+' '+(n==1?'panel':(n%10>=2&&n%10<=4&&(n%100<10||n%100>=20)?'panele':'paneli')):''}</span><span class="rw" style="color:${col}">${v}</span></div>`;
+   R.push(`<div class="roof">${head('Dach · SolarEdge',se.length,L.se_valid?w(L.se_w):'–','#3b82f6')}${roofSvg(se)}${se.length?
+     (ED.on?`<div class="redit"><span>Tryb przypisywania: dotknij panel na rysunku i wybierz optymalizator.</span><button class="btn" id="edSave">Zapisz układ</button><button class="btn sec" id="edCancel">Anuluj</button></div>`
+-- 
+2.43.0
+
