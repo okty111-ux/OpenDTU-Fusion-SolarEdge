@@ -1,0 +1,84 @@
+From 3768b9884f74f6708f03aa071a14603574db276c Mon Sep 17 00:00:00 2001
+From: Okty <okty@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 11:54:10 +0100
+Subject: [PATCH] Hoymiles: repeat missing grid profile / device info / RF info
+ requests at most every 5-15 min, not on every poll
+
+An inverter that does not answer one of them got it again on every poll;
+each try is a full radio transaction with resends and counts as 'nothing
+received' in the radio statistics.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ lib/Hoymiles/src/Hoymiles.cpp | 28 +++++++++++++++++++++++-----
+ 1 file changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/lib/Hoymiles/src/Hoymiles.cpp b/lib/Hoymiles/src/Hoymiles.cpp
+index 62678ac5..18d32e95 100644
+--- a/lib/Hoymiles/src/Hoymiles.cpp
++++ b/lib/Hoymiles/src/Hoymiles.cpp
+@@ -4,6 +4,7 @@
+  */
+ #include "Hoymiles.h"
+ #include "HoymilesUtils.h"
++#include <map>
+ #include "inverters/HERF_1CH.h"
+ #include "inverters/HERF_2CH.h"
+ #include "inverters/HERF_4CH.h"
+@@ -42,6 +43,20 @@ void HoymilesClass::initCMT(const int8_t pin_sdio, const int8_t pin_clk, const i
+     _radioCmt->init(pin_sdio, pin_clk, pin_cs, pin_fcs, pin_gpio2, pin_gpio3);
+ }
+ 
++// Info requests that are repeated while their data is missing (grid profile,
++// device info, RF module info). An inverter that does not answer one of them
++// (e.g. MIT-5000-8T) got it again on every poll: each try costs a whole radio
++// transaction with resends and is counted as "nothing received". Repeat them at
++// most every few minutes instead.
++static bool optionalDue(std::map<uint64_t, uint32_t>& last, const uint64_t serial, const uint32_t everyMs)
++{
++    const uint32_t now = millis();
++    auto it = last.find(serial);
++    if (it != last.end() && now - it->second < everyMs) return false;
++    last[serial] = now;
++    return true;
++}
++
+ void HoymilesClass::loop()
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+@@ -92,7 +107,9 @@ void HoymilesClass::loop()
+                 }
+ 
+                 // Fetch grid profile
+-                if (iv->Statistics()->getLastUpdate() > 0 && (iv->GridProfile()->getLastUpdate() == 0 || !iv->GridProfile()->containsValidData())) {
++                static std::map<uint64_t, uint32_t> lastGrid, lastDev, lastRf;
++                if (iv->Statistics()->getLastUpdate() > 0 && (iv->GridProfile()->getLastUpdate() == 0 || !iv->GridProfile()->containsValidData())
++                    && optionalDue(lastGrid, iv->serial(), 10 * 60 * 1000)) {
+                     iv->sendGridOnProFileParaRequest();
+                 }
+ 
+@@ -106,15 +123,16 @@ void HoymilesClass::loop()
+                         ESP_LOGW(TAG, "DevInfo: No Valid Data");
+                     }
+ 
+-                    if ((iv->DevInfo()->getLastUpdateAll() == 0)
+-                        || (iv->DevInfo()->getLastUpdateSimple() == 0)
+-                        || invalidDevInfo) {
++                    if (((iv->DevInfo()->getLastUpdateAll() == 0)
++                            || (iv->DevInfo()->getLastUpdateSimple() == 0)
++                            || invalidDevInfo)
++                        && optionalDue(lastDev, iv->serial(), 5 * 60 * 1000)) {
+                         ESP_LOGI(TAG, "Request device info");
+                         iv->sendDevInfoRequest();
+                     }
+ 
+                     // Fetch RF module info (only required once)
+-                    if (!iv->RfInfo()->containsValidData()) {
++                    if (!iv->RfInfo()->containsValidData() && optionalDue(lastRf, iv->serial(), 15 * 60 * 1000)) {
+                         ESP_LOGI(TAG, "Request RF info");
+                         iv->sendRfInfoRequest();
+                     }
+-- 
+2.43.0
+
