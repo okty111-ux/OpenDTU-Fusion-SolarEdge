@@ -1,0 +1,97 @@
+From 718fdf59e074cdbf51dbb39ac32119ba588ab0e3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 14:18:27 +0100
+Subject: [PATCH] Restart: full chip reset (as a power cycle) instead of a
+ software restart, Tuya closed first; a planned restart does not pause the
+ SolarEdge cloud
+
+After an update Fusion sometimes stayed without network until the power was switched off and on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/SolarEdgeCloud.h |  3 +++
+ src/RestartHelper.cpp    | 31 +++++++++++++++++++++++++++++--
+ src/SolarEdgeCloud.cpp   |  5 +++++
+ 3 files changed, 37 insertions(+), 2 deletions(-)
+
+diff --git a/include/SolarEdgeCloud.h b/include/SolarEdgeCloud.h
+index 736b95d1..29d3c971 100644
+--- a/include/SolarEdgeCloud.h
++++ b/include/SolarEdgeCloud.h
+@@ -110,4 +110,7 @@ private:
+     time_t _prodPrevT = 0, _prodChangeT = 0;
+ };
+ 
++// planned restart (update, button): not a crash of the fetch
++void seCloudCleanRestart();
++
+ extern SolarEdgeCloudClass SolarEdgeCloud;
+diff --git a/src/RestartHelper.cpp b/src/RestartHelper.cpp
+index 96a452c2..1af3fcb6 100644
+--- a/src/RestartHelper.cpp
++++ b/src/RestartHelper.cpp
+@@ -5,7 +5,16 @@
+ #include "RestartHelper.h"
+ #include "Display_Graphic.h"
+ #include "Led_Single.h"
++#include "FusionTuya.h"
++#include "SolarEdgeCloud.h"
+ #include <Esp.h>
++#if __has_include(<soc/rtc_wdt.h>)
++#include <soc/rtc_wdt.h>
++#define FUSION_RTC_RESET 1
++#elif __has_include(<rtc_wdt.h>)
++#include <rtc_wdt.h>
++#define FUSION_RTC_RESET 1
++#endif
+ 
+ RestartHelperClass RestartHelper;
+ 
+@@ -30,7 +39,25 @@ void RestartHelperClass::loop()
+     if (_rebootTask.isFirstIteration()) {
+         LedSingle.turnAllOff();
+         Display.setStatus(false);
+-    } else {
+-        ESP.restart();
++        FusionTuya.hold(true); // close the Tuya TLS connection before the restart
++        seCloudCleanRestart(); // a planned restart is not a crash of the SolarEdge fetch
++        return;
+     }
++    seCloudCleanRestart();
++#ifdef FUSION_RTC_RESET
++    // Full chip reset (also radio and network part), like switching the power off and on.
++    // A plain software restart sometimes left Fusion without network until a power cycle.
++    rtc_wdt_protect_off();
++    rtc_wdt_disable();
++    rtc_wdt_set_length_of_reset_signal(RTC_WDT_SYS_RESET_SIG, RTC_WDT_LENGTH_3_2us);
++    rtc_wdt_set_stage(RTC_WDT_STAGE0, RTC_WDT_STAGE_ACTION_RESET_RTC);
++    rtc_wdt_set_time(RTC_WDT_STAGE0, 300);
++    rtc_wdt_enable();
++    rtc_wdt_protect_on();
++    const uint32_t t0 = millis();
++    while (millis() - t0 < 3000) {
++        delay(10); // the watchdog resets the chip here
++    }
++#endif
++    ESP.restart(); // fallback if the full reset did not happen
+ }
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index 63d3f4a8..39016c51 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -215,6 +215,11 @@ static String cookieHeader(const std::map<String, String>& jar)
+ // cloud is paused and the step is shown, instead of a restart loop.
+ static RTC_NOINIT_ATTR uint32_t s_crashMagic;
+ static RTC_NOINIT_ATTR uint32_t s_step;
++
++void seCloudCleanRestart()
++{
++    s_step = 0;
++}
+ static const uint32_t CRASH_MAGIC = 0x5ECA0D01;
+ static void step(uint32_t n)
+ {
+-- 
+2.43.0
+
