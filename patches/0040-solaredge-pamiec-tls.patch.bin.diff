@@ -1,0 +1,156 @@
+From cdab0ea7864e7026e9901a6e7800f91b8ca76bf8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 11:30:16 +0100
+Subject: [PATCH] SolarEdge cloud: pause Tuya's TLS connection during the fetch
+ when memory is short, retry the TLS connect once, keep the refresh token on
+ network errors
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/FusionTuya.h     |  6 ++++++
+ include/SolarEdgeCloud.h |  1 +
+ src/FusionTuya.cpp       | 10 ++++++++++
+ src/SolarEdgeCloud.cpp   | 40 +++++++++++++++++++++++++++++++++++++++-
+ 4 files changed, 56 insertions(+), 1 deletion(-)
+
+diff --git a/include/FusionTuya.h b/include/FusionTuya.h
+index 3f3fcaf5..4a9a08a4 100644
+--- a/include/FusionTuya.h
++++ b/include/FusionTuya.h
+@@ -28,6 +28,10 @@ public:
+     void statusToJson(JsonVariant root);
+     void reportNow() { _forceReport = true; }
+ 
++    // another TLS client needs the memory: close the MQTT/TLS connection until released
++    void hold(bool on) { _hold = on; }
++    bool idle() const { return _client == nullptr; }
++
+     // called from the MQTT task
+     void onEvent(int32_t id, void* data);
+ 
+@@ -44,6 +48,8 @@ private:
+     void* _client = nullptr;
+     volatile bool _connected = false;
+     volatile bool _forceReport = false;
++    volatile bool _hold = false;
++    bool _wasHeld = false;
+     bool _restart = false;
+     uint32_t _lastTry = 0, _lastReport = 0, _retry = 5000;
+     uint32_t _sent = 0, _acked = 0;
+diff --git a/include/SolarEdgeCloud.h b/include/SolarEdgeCloud.h
+index fab64714..736b95d1 100644
+--- a/include/SolarEdgeCloud.h
++++ b/include/SolarEdgeCloud.h
+@@ -98,6 +98,7 @@ private:
+     volatile bool _refresh = false;
+     volatile bool _cfgChanged = false;
+     volatile bool _loginBlocked = false; // last login rejected: wait for the user
++    bool _netDown = false; // last token refresh got no answer at all
+     bool _crashPaused = false;           // device restarted from a crash in this task
+     uint32_t _requests = 0, _logins = 0;
+     struct Seen { String meas; uint32_t sinceMs; };
+diff --git a/src/FusionTuya.cpp b/src/FusionTuya.cpp
+index ff0081d2..c1856920 100644
+--- a/src/FusionTuya.cpp
++++ b/src/FusionTuya.cpp
+@@ -224,6 +224,16 @@ void FusionTuyaClass::loop()
+         _restart = false;
+     }
+     if (restart) disconnect();
++    if (_hold) {
++        disconnect(); // frees ~40 kB of TLS buffers for the SolarEdge cloud fetch
++        _wasHeld = true;
++        return;
++    }
++    if (_wasHeld) { // reconnect right away after the pause
++        _wasHeld = false;
++        _retry = 5000;
++        _lastTry = millis() - _retry;
++    }
+     const bool ready = c.enabled && c.deviceId.length() > 4 && c.secret.length() > 4;
+     if (!ready) {
+         disconnect();
+diff --git a/src/SolarEdgeCloud.cpp b/src/SolarEdgeCloud.cpp
+index eb90f5a3..63d3f4a8 100644
+--- a/src/SolarEdgeCloud.cpp
++++ b/src/SolarEdgeCloud.cpp
+@@ -2,6 +2,7 @@
+ #include "SolarEdgeCloud.h"
+ #include "SolarEdge.h"
+ #include "SunPosition.h"
++#include "FusionTuya.h"
+ #include <LittleFS.h>
+ #include <errno.h>
+ #include <esp_attr.h>
+@@ -339,7 +340,18 @@ static int httpDo(esp_http_client_method_t method, const String& url, const Stri
+         g_netErr = "brak pamięci na TLS";
+         return -1;
+     }
+-    if (esp_tls_conn_new_sync(host.c_str(), host.length(), 443, &cfg, tls) != 1) {
++    int ok = esp_tls_conn_new_sync(host.c_str(), host.length(), 443, &cfg, tls);
++    if (ok != 1) { // one more try: a short network hiccup or a moment without enough memory
++        esp_tls_conn_destroy(tls);
++        vTaskDelay(pdMS_TO_TICKS(3000));
++        tls = esp_tls_init();
++        if (!tls) {
++            g_netErr = "brak pamięci na TLS";
++            return -1;
++        }
++        ok = esp_tls_conn_new_sync(host.c_str(), host.length(), 443, &cfg, tls);
++    }
++    if (ok != 1) {
+         const int en = errno;
+         g_netErr = String("połączenie TLS z ") + host + " nieudane (errno " + String(en) + ")";
+         ESP_LOGW(TAG, "%s", g_netErr.c_str());
+@@ -739,6 +751,10 @@ bool SolarEdgeCloudClass::refreshToken()
+     HttpCtx ctx;
+     const int st = httpDo(HTTP_METHOD_POST, String(LOGIN_BASE) + "/oauth2/token", body, "application/x-www-form-urlencoded",
+         { { "Origin", MON_BASE }, { "Referer", String(MON_BASE) + "/" }, { "Accept", "*/*" } }, ctx);
++    if (st < 0) {
++        _netDown = true; // no answer at all: keep the token, do not fall back to a password login
++        return false;
++    }
+     JsonDocument d;
+     if (st != 200 || deserializeJson(d, ctx.body) || !d["access_token"].is<const char*>()) {
+         _refreshTok = "";
+@@ -757,7 +773,12 @@ bool SolarEdgeCloudClass::ensureToken()
+ {
+     if (_access.length() && (int32_t)(_accessUntil - millis()) > 0) return true;
+     _access = "";
++    _netDown = false;
+     if (refreshToken()) return true;
++    if (_netDown) {
++        setError(String("Brak połączenia z login.solaredge.com – ") + netErrText() + ". Ponowię przy następnym pobraniu (bez logowania hasłem).");
++        return false;
++    }
+     return login();
+ }
+ 
+@@ -1138,6 +1159,23 @@ bool SolarEdgeCloudClass::fetchProduction()
+ 
+ bool SolarEdgeCloudClass::cycle()
+ {
++    // Tuya keeps a TLS connection open (~40 kB); with less than this in one block
++    // the TLS handshake to SolarEdge fails, so Tuya pauses for the few seconds of the fetch
++    struct TuyaPause {
++        bool on = false;
++        TuyaPause()
++        {
++            if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= 60 * 1024) return;
++            on = true;
++            FusionTuya.hold(true);
++            for (int i = 0; i < 50 && !FusionTuya.idle(); i++) vTaskDelay(pdMS_TO_TICKS(100));
++            vTaskDelay(pdMS_TO_TICKS(500));
++        }
++        ~TuyaPause()
++        {
++            if (on) FusionTuya.hold(false);
++        }
++    } tuyaPause;
+     {
+         std::lock_guard<std::mutex> lock(_mutex);
+         _state = "pobieranie";
+-- 
+2.43.0
+
