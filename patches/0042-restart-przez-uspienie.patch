@@ -1,0 +1,60 @@
+From 092c61090914b3f66eef7748ddaa25901809d346 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 14:45:36 +0100
+Subject: [PATCH] Restart: power-cycle-like restart through a 0.5 s deep sleep
+ instead of the RTC watchdog (fixes the build of 0041)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ src/RestartHelper.cpp | 28 ++++++----------------------
+ 1 file changed, 6 insertions(+), 22 deletions(-)
+
+diff --git a/src/RestartHelper.cpp b/src/RestartHelper.cpp
+index 1af3fcb6..509b8322 100644
+--- a/src/RestartHelper.cpp
++++ b/src/RestartHelper.cpp
+@@ -8,13 +8,7 @@
+ #include "FusionTuya.h"
+ #include "SolarEdgeCloud.h"
+ #include <Esp.h>
+-#if __has_include(<soc/rtc_wdt.h>)
+-#include <soc/rtc_wdt.h>
+-#define FUSION_RTC_RESET 1
+-#elif __has_include(<rtc_wdt.h>)
+-#include <rtc_wdt.h>
+-#define FUSION_RTC_RESET 1
+-#endif
++#include <esp_sleep.h>
+ 
+ RestartHelperClass RestartHelper;
+ 
+@@ -44,20 +38,10 @@ void RestartHelperClass::loop()
+         return;
+     }
+     seCloudCleanRestart();
+-#ifdef FUSION_RTC_RESET
+-    // Full chip reset (also radio and network part), like switching the power off and on.
+-    // A plain software restart sometimes left Fusion without network until a power cycle.
+-    rtc_wdt_protect_off();
+-    rtc_wdt_disable();
+-    rtc_wdt_set_length_of_reset_signal(RTC_WDT_SYS_RESET_SIG, RTC_WDT_LENGTH_3_2us);
+-    rtc_wdt_set_stage(RTC_WDT_STAGE0, RTC_WDT_STAGE_ACTION_RESET_RTC);
+-    rtc_wdt_set_time(RTC_WDT_STAGE0, 300);
+-    rtc_wdt_enable();
+-    rtc_wdt_protect_on();
+-    const uint32_t t0 = millis();
+-    while (millis() - t0 < 3000) {
+-        delay(10); // the watchdog resets the chip here
+-    }
+-#endif
++    // Restart through a short deep sleep: radio, Wi-Fi and the digital part are switched
++    // off and start like after a power cycle. A plain software restart sometimes left
++    // Fusion without network until the power was switched off and on.
++    esp_sleep_enable_timer_wakeup(500 * 1000ULL); // 0.5 s
++    esp_deep_sleep_start(); // does not return
+     ESP.restart(); // fallback if the full reset did not happen
+ }
+-- 
+2.43.0
+
