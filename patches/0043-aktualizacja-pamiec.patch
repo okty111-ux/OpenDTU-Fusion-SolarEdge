@@ -1,0 +1,109 @@
+From 93f01cc6a297ca41ff3469462051b226b999bb44 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 16:42:19 +0100
+Subject: [PATCH] =?UTF-8?q?GitHub=20update:=20close=20Tuya's=20TLS=20conne?=
+ =?UTF-8?q?ction=20before=20starting=20the=20update=20task=20(it=20failed?=
+ =?UTF-8?q?=20with=20'brak=20pami=C4=99ci=20na=20zadanie')?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EySGZ7zzCqzbQeGccwYzek
+---
+ include/FusionUpdate.h |  3 +++
+ src/FusionUpdate.cpp   | 34 ++++++++++++++++++++++++----------
+ 2 files changed, 27 insertions(+), 10 deletions(-)
+
+diff --git a/include/FusionUpdate.h b/include/FusionUpdate.h
+index fe92aebe..5abf6f22 100644
+--- a/include/FusionUpdate.h
++++ b/include/FusionUpdate.h
+@@ -57,6 +57,9 @@ private:
+     bool _checkedOnce = false;
+     volatile bool _busy = false;
+     uint8_t _job = 0; // 1 = check, 2 = install
++    bool _startPending = false; // task starts from loop() once Tuya has freed its TLS memory
++    uint32_t _pendingSince = 0;
++    void startTask();
+     Task _loopTask;
+ };
+ 
+diff --git a/src/FusionUpdate.cpp b/src/FusionUpdate.cpp
+index ff5754d1..ec256968 100644
+--- a/src/FusionUpdate.cpp
++++ b/src/FusionUpdate.cpp
+@@ -3,6 +3,7 @@
+ #include "FusionVersion.h"
+ #include <esp_log.h>
+ #include "RestartHelper.h"
++#include "FusionTuya.h"
+ #include <LittleFS.h>
+ #include <esp_http_client.h>
+ #include <esp_ota_ops.h>
+@@ -186,8 +187,28 @@ void FusionUpdateClass::init(Scheduler& scheduler)
+     ESP_LOGI(TAG, "FusionUpdate: version %d, repo %s, asset %s", FUSION_VERSION, _cfg.repo.c_str(), FUSION_ASSET_NAME);
+ }
+ 
++// The update needs a 10 kB task and a TLS connection to GitHub; with Tuya's TLS
++// connection open there was often not enough memory ("brak pamięci na zadanie").
++// Tuya is closed first and the task is started once its memory is free.
++void FusionUpdateClass::startTask()
++{
++    FusionTuya.hold(true);
++    _pendingSince = millis();
++    _startPending = true;
++}
++
+ void FusionUpdateClass::loop()
+ {
++    if (_startPending) {
++        if (!FusionTuya.idle() && millis() - _pendingSince < 10000) return;
++        _startPending = false;
++        if (xTaskCreatePinnedToCore(taskEntry, "fusion_upd", 10240, this, 1, nullptr, 0) != pdPASS) {
++            FusionTuya.hold(false);
++            _busy = false;
++            setState(FuState::Error, "brak pamięci na zadanie");
++        }
++        return;
++    }
+     if (_busy || !_cfg.autoCheck) return;
+     const uint32_t now = millis();
+     const bool due = !_checkedOnce ? (now - _bootMs > FU_FIRST_CHECK_MS) : (now - _lastCheckMs > FU_CHECK_EVERY_MS);
+@@ -202,11 +223,7 @@ bool FusionUpdateClass::requestCheck()
+     _checkedOnce = true;
+     _lastCheckMs = millis();
+     setState(FuState::Checking, "");
+-    if (xTaskCreatePinnedToCore(taskEntry, "fusion_upd", 10240, this, 1, nullptr, 0) != pdPASS) {
+-        _busy = false;
+-        setState(FuState::Error, "brak pamięci na zadanie");
+-        return false;
+-    }
++    startTask();
+     return true;
+ }
+ 
+@@ -220,11 +237,7 @@ bool FusionUpdateClass::requestInstall()
+     _busy = true;
+     _job = 2;
+     setState(FuState::Downloading, "");
+-    if (xTaskCreatePinnedToCore(taskEntry, "fusion_upd", 10240, this, 1, nullptr, 0) != pdPASS) {
+-        _busy = false;
+-        setState(FuState::Error, "brak pamięci na zadanie");
+-        return false;
+-    }
++    startTask();
+     return true;
+ }
+ 
+@@ -239,6 +252,7 @@ void FusionUpdateClass::taskEntry(void* arg)
+     auto* self = static_cast<FusionUpdateClass*>(arg);
+     if (self->_job == 1) self->doCheck();
+     else if (self->_job == 2) self->doInstall();
++    FusionTuya.hold(false);
+     self->_busy = false;
+     vTaskDelete(nullptr);
+ }
+-- 
+2.43.0
+
